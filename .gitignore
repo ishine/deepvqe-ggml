@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+checkpoints/
+logs/
+*.pt
+*.bin
+.claude/
+uv.lock

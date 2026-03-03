@@ -1,0 +1,52 @@
+model:
+  mic_channels: [2, 64, 128, 128, 128, 128]
+  far_channels: [2, 32, 128]
+  align_hidden: 32
+  dmax: 32
+  power_law_c: 0.3
+
+audio:
+  sample_rate: 16000
+  n_fft: 512
+  hop_length: 256
+  n_freqs: 257  # n_fft // 2 + 1
+
+training:
+  batch_size: 8
+  grad_accum_steps: 12
+  lr: 1.2e-3
+  weight_decay: 5.0e-7
+  epochs: 250
+  clip_length_sec: 3.0
+  amp: true
+  grad_clip: 5.0
+  warmup_epochs: 5
+  checkpoint_every: 5
+  keep_checkpoints: 5
+
+loss:
+  plcmse_weight: 1.0
+  mag_l1_weight: 0.5
+  time_l1_weight: 0.1
+  power_law_c: 0.3
+
+data:
+  clean_dir: ""       # path to DNS clean speech
+  noise_dir: ""       # path to DNS noise
+  rir_dir: ""         # path to RIR datasets
+  farend_dir: ""      # path to far-end speech (can be same as clean_dir)
+  snr_range: [5, 40]
+  ser_range: [-10, 10]
+  delay_range: [0, 320]  # ms
+  max_delay_frames: 32   # matches dmax
+  single_talk_prob: 0.2
+  num_train: 10000
+  num_val: 1000
+
+eval:
+  pesq_subset: 200
+  audio_samples: 10
+
+paths:
+  checkpoint_dir: checkpoints
+  log_dir: logs
