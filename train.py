@@ -25,6 +25,18 @@ from src.config import load_config
 from src.losses import DeepVQELoss
 from src.model import DeepVQEAEC
 from src.stft import istft
+from src.viz import (
+    log_loss_ratios,
+    log_per_layer_grad_norms,
+    log_weight_histograms,
+    plot_activation_stats,
+    plot_ccm_mask,
+    plot_delay_with_gt,
+    plot_encoder_activations,
+    plot_spectrogram_comparison,
+    register_hooks,
+    remove_hooks,
+)
 
 
 def collate_fn(batch):
@@ -177,8 +189,15 @@ def manage_checkpoints(ckpt_dir, keep_n):
 
 
 def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device):
-    """Log audio samples and spectrograms to TensorBoard."""
+    """Log audio samples, spectrograms, and diagnostic figures to TensorBoard."""
+    import matplotlib.pyplot as plt
+
+    raw_model = _unwrap(model)
     model.eval()
+
+    # Register hooks for activation capture
+    activation_store, hook_handles = register_hooks(raw_model)
+
     with torch.no_grad():
         mic_stft = val_batch["mic_stft"][:1].to(device)
         ref_stft = val_batch["ref_stft"][:1].to(device)
@@ -196,24 +215,39 @@ def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device):
         writer.add_audio("audio/enhanced", enh_wav[0].cpu(), epoch, sample_rate=sr)
         writer.add_audio("audio/clean", clean_wav[0].cpu(), epoch, sample_rate=sr)
 
-        # Log delay distribution heatmap
-        if delay_dist is not None:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
+        # Spectrogram comparison
+        fig = plot_spectrogram_comparison(
+            mic_stft, enhanced, clean_stft, sr, cfg.audio.hop_length,
+        )
+        writer.add_figure("spectrograms/comparison", fig, epoch)
+        plt.close(fig)
 
-            fig, ax = plt.subplots(1, 1, figsize=(10, 4))
-            ax.imshow(
-                delay_dist[0].cpu().numpy().T,
-                aspect="auto",
-                origin="lower",
-                cmap="viridis",
+        # Delay distribution with ground truth
+        if delay_dist is not None:
+            gt_delay = val_batch["delay_samples"][0]
+            fig = plot_delay_with_gt(
+                delay_dist, gt_delay, cfg.audio.hop_length, cfg.model.dmax,
             )
-            ax.set_xlabel("Frame")
-            ax.set_ylabel("Delay (frames)")
-            ax.set_title("Delay Distribution")
-            writer.add_figure("delay_distribution", fig, epoch)
+            writer.add_figure("delay/distribution_with_gt", fig, epoch)
             plt.close(fig)
+
+        # CCM mask analysis (from hooked dec1 output = 27ch mask)
+        if "dec1" in activation_store:
+            fig = plot_ccm_mask(activation_store["dec1"], mic_stft)
+            writer.add_figure("ccm/mask_magnitude", fig, epoch)
+            plt.close(fig)
+
+        # Encoder activations
+        if activation_store:
+            fig = plot_encoder_activations(activation_store)
+            writer.add_figure("activations/encoder_stages", fig, epoch)
+            plt.close(fig)
+
+            fig = plot_activation_stats(activation_store)
+            writer.add_figure("activations/statistics", fig, epoch)
+            plt.close(fig)
+
+    remove_hooks(hook_handles)
     model.train()
 
 
@@ -403,6 +437,8 @@ def train(cfg, resume=None, dummy=False):
                 writer.add_scalar("train/entropy", components["entropy"].item(), global_step)
                 writer.add_scalar("train/lr", cur_lr, global_step)
                 writer.add_scalar("train/grad_norm", gn, global_step)
+                log_per_layer_grad_norms(writer, _unwrap(model), global_step)
+                log_loss_ratios(writer, components, global_step)
 
             for k in epoch_losses:
                 epoch_losses[k] += components[k].item()
@@ -421,6 +457,10 @@ def train(cfg, resume=None, dummy=False):
             writer.add_scalar(f"train_epoch/{k}", epoch_losses[k], epoch)
         epoch_delay_acc /= max(n_batches, 1)
         writer.add_scalar("train_epoch/delay_acc", epoch_delay_acc, epoch)
+
+        # Weight histograms every 5 epochs
+        if (epoch + 1) % 5 == 0:
+            log_weight_histograms(writer, _unwrap(model), epoch)
 
         # Validation
         model.eval()
