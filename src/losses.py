@@ -93,15 +93,15 @@ class DeepVQELoss(nn.Module):
             pred_wav = istft(
                 pred_stft, self.n_fft, self.hop_length, length=target_wav.shape[-1]
             )
-            time_l1 = torch.mean(torch.abs(pred_wav - target_wav))
-            sisdr_loss = si_sdr(pred_wav, target_wav)
+            time_l1 = torch.mean(torch.abs(pred_wav - target_wav)) if self.time_l1_weight > 0 else torch.tensor(0.0, device=pred_stft.device)
+            sisdr_loss = si_sdr(pred_wav, target_wav) if self.sisdr_weight > 0 else torch.tensor(0.0, device=pred_stft.device)
             components["time_l1"] = time_l1
             components["sisdr"] = sisdr_loss
         else:
-            time_l1 = torch.tensor(0.0, device=pred_stft.device)
-            sisdr_loss = torch.tensor(0.0, device=pred_stft.device)
-            components["time_l1"] = time_l1
-            components["sisdr"] = sisdr_loss
+            components["time_l1"] = torch.tensor(0.0, device=pred_stft.device)
+            components["sisdr"] = torch.tensor(0.0, device=pred_stft.device)
+            time_l1 = components["time_l1"]
+            sisdr_loss = components["sisdr"]
 
         total = (
             self.plcmse_weight * plcmse

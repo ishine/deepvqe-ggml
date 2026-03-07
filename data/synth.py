@@ -11,6 +11,7 @@ Generates training examples on-the-fly:
 """
 
 import random
+from math import gcd
 
 import numpy as np
 import soundfile as sf
@@ -34,7 +35,6 @@ def _load_random_audio(file_list, target_len, sr=16000):
         if audio.ndim > 1:
             audio = audio[:, 0]
         # Use polyphase anti-aliasing filter for proper downsampling
-        from math import gcd
         g = gcd(sr, file_sr)
         audio = resample_poly(audio, sr // g, file_sr // g).astype(np.float32)
     elif total_frames <= target_len:

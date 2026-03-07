@@ -92,6 +92,11 @@ def compute_delay_loss(delay_dist, delay_samples, hop_length, dmax):
     return loss, accuracy
 
 
+def compute_attention_entropy(delay_dist):
+    """Entropy of the delay attention distribution: H = -sum(p * log(p))."""
+    return -(delay_dist * torch.log(delay_dist + 1e-10)).sum(dim=-1).mean()
+
+
 def compute_erle(mic_wav, enhanced_wav, clean_wav):
     """Compute Echo Return Loss Enhancement in dB.
 
@@ -102,7 +107,7 @@ def compute_erle(mic_wav, enhanced_wav, clean_wav):
     residual = enhanced_wav - clean_wav
     echo_power = (echo_plus_noise ** 2).sum(dim=-1)
     residual_power = (residual ** 2).sum(dim=-1)
-    erle = 10 * torch.log10(echo_power / (residual_power + 1e-10) + 1e-10)
+    erle = 10 * torch.log10(echo_power / (residual_power + 1e-10))
     return erle.mean()
 
 
@@ -128,16 +133,6 @@ def get_plateau_scheduler(optimizer, cfg):
         min_lr=cfg.training.lr_min,
     )
 
-
-def log_health(writer, model, global_step):
-    """Log per-module gradient norms, weight stats, and AlignBlock attention entropy."""
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            writer.add_scalar(f"grad_norm/{name}", param.grad.data.norm(2).item(), global_step)
-        writer.add_scalar(f"weight_mean/{name}", param.data.mean().item(), global_step)
-        writer.add_scalar(f"weight_std/{name}", param.data.std().item(), global_step)
-        absmax = param.data.abs().max().item()
-        writer.add_scalar(f"weight_absmax/{name}", absmax, global_step)
 
 
 def _unwrap(model):
@@ -274,7 +269,7 @@ def train(cfg, resume=None, dummy=False):
         train_ds = AECDataset(cfg, split="train")
         val_ds = AECDataset(cfg, split="val")
 
-    num_workers = getattr(cfg.training, "num_workers", 4)
+    num_workers = cfg.training.num_workers
     pin = device.type == "cuda"
 
     def worker_init_fn(worker_id):
@@ -329,8 +324,8 @@ def train(cfg, resume=None, dummy=False):
     global_step = start_epoch * steps_per_epoch
     warmup_done = start_epoch >= cfg.training.warmup_epochs
     accum_steps = cfg.training.grad_accum_steps
-    patience = getattr(cfg.training, "early_stop_patience", 0)
-    min_delta = getattr(cfg.training, "early_stop_min_delta", 1e-3)
+    patience = cfg.training.early_stop_patience
+    min_delta = cfg.training.early_stop_min_delta
     epochs_without_improvement = 0
 
     for epoch in range(start_epoch, cfg.training.epochs):
@@ -377,7 +372,7 @@ def train(cfg, resume=None, dummy=False):
 
                 # Entropy penalty on delay attention
                 if cfg.loss.entropy_weight > 0:
-                    entropy = -(delay_dist * torch.log(delay_dist + 1e-10)).sum(dim=-1).mean()
+                    entropy = compute_attention_entropy(delay_dist)
                     components["entropy"] = entropy
                     loss = loss + cfg.loss.entropy_weight * entropy
                 else:
@@ -455,7 +450,7 @@ def train(cfg, resume=None, dummy=False):
                 )
                 components["delay"] = delay_loss
 
-                entropy = -(delay_dist * torch.log(delay_dist + 1e-10)).sum(dim=-1).mean()
+                entropy = compute_attention_entropy(delay_dist)
                 components["entropy"] = entropy
 
                 # ERLE

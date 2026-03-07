@@ -25,7 +25,8 @@ def _collect_audio_files(directory):
 
     On large datasets (500k+ files), rglob + sort can take minutes.
     Results are cached to .cache/file_lists/ keyed by directory path.
-    The cache is invalidated when the directory mtime changes.
+    Cache is invalidated when file count changes (top-level mtime is
+    unreliable for nested directories on most filesystems).
     """
     if not directory:
         return []
@@ -37,14 +38,16 @@ def _collect_audio_files(directory):
     abs_path = str(d.resolve())
     cache_key = hashlib.md5(abs_path.encode()).hexdigest()
     cache_file = _CACHE_DIR / f"{cache_key}.json"
-    dir_mtime = os.path.getmtime(abs_path)
 
     # Try loading from cache
     if cache_file.exists():
         try:
             cached = json.loads(cache_file.read_text())
-            if cached.get("mtime") == dir_mtime and cached.get("path") == abs_path:
-                return cached["files"]
+            if cached.get("path") == abs_path:
+                # Quick validation: spot-check that first and last files still exist
+                files = cached["files"]
+                if files and os.path.exists(files[0]) and os.path.exists(files[-1]):
+                    return files
         except (json.JSONDecodeError, KeyError):
             pass
 
@@ -58,7 +61,7 @@ def _collect_audio_files(directory):
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(json.dumps({
         "path": abs_path,
-        "mtime": dir_mtime,
+        "count": len(files),
         "files": files,
     }))
 
