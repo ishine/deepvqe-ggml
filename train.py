@@ -26,6 +26,7 @@ from src.losses import DeepVQELoss
 from src.model import DeepVQEAEC
 from src.stft import istft
 from src.viz import (
+    add_scalar_with_help,
     log_loss_ratios,
     log_per_layer_grad_norms,
     log_weight_histograms,
@@ -263,6 +264,15 @@ def train(cfg, resume=None, dummy=False):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_dir = Path(cfg.paths.log_dir)
 
+    # Clean stale TensorBoard event files from previous runs so they don't
+    # pollute the dashboard with overlapping / misleading data.
+    if not resume:
+        stale = list(log_dir.glob("events.out.tfevents.*"))
+        if stale:
+            print(f"Cleaning {len(stale)} stale event file(s) from {log_dir}")
+            for f in stale:
+                f.unlink()
+
     writer = SummaryWriter(log_dir)
 
     # Model
@@ -302,6 +312,7 @@ def train(cfg, resume=None, dummy=False):
     else:
         train_ds = AECDataset(cfg, split="train")
         val_ds = AECDataset(cfg, split="val")
+        print(f"Train: {len(train_ds)} clean files, Val: {len(val_ds)} examples")
 
     num_workers = cfg.training.num_workers
     pin = device.type == "cuda"
@@ -375,7 +386,7 @@ def train(cfg, resume=None, dummy=False):
             temperature = t_end
         align = _unwrap(model).align
         align.temperature = temperature
-        writer.add_scalar("train/temperature", temperature, epoch)
+        add_scalar_with_help(writer, "train/temperature", temperature, epoch)
 
         epoch_losses = {
             "total": 0, "plcmse": 0, "mag_l1": 0, "time_l1": 0,
@@ -412,6 +423,9 @@ def train(cfg, resume=None, dummy=False):
                 else:
                     components["entropy"] = torch.tensor(0.0, device=device)
 
+                # Update total so loss_ratio/* metrics use the true total
+                components["total"] = loss
+
                 loss = loss / accum_steps
 
             loss.backward()
@@ -427,18 +441,26 @@ def train(cfg, resume=None, dummy=False):
 
                 # Log per-step
                 cur_lr = optimizer.param_groups[0]["lr"]
-                writer.add_scalar("train/loss", components["total"].item(), global_step)
-                writer.add_scalar("train/plcmse", components["plcmse"].item(), global_step)
-                writer.add_scalar("train/mag_l1", components["mag_l1"].item(), global_step)
-                writer.add_scalar("train/time_l1", components["time_l1"].item(), global_step)
-                writer.add_scalar("train/sisdr", components["sisdr"].item(), global_step)
-                writer.add_scalar("train/delay_loss", components["delay"].item(), global_step)
-                writer.add_scalar("train/delay_acc", delay_acc.item(), global_step)
-                writer.add_scalar("train/entropy", components["entropy"].item(), global_step)
-                writer.add_scalar("train/lr", cur_lr, global_step)
-                writer.add_scalar("train/grad_norm", gn, global_step)
+                add_scalar_with_help(writer, "train/loss", components["total"].item(), global_step)
+                add_scalar_with_help(writer, "train/plcmse", components["plcmse"].item(), global_step)
+                add_scalar_with_help(writer, "train/mag_l1", components["mag_l1"].item(), global_step)
+                add_scalar_with_help(writer, "train/time_l1", components["time_l1"].item(), global_step)
+                add_scalar_with_help(writer, "train/sisdr", components["sisdr"].item(), global_step)
+                add_scalar_with_help(writer, "train/delay_loss", components["delay"].item(), global_step)
+                add_scalar_with_help(writer, "train/delay_acc", delay_acc.item(), global_step)
+                add_scalar_with_help(writer, "train/entropy", components["entropy"].item(), global_step)
+                add_scalar_with_help(writer, "train/lr", cur_lr, global_step)
+                add_scalar_with_help(writer, "train/grad_norm", gn, global_step)
                 log_per_layer_grad_norms(writer, _unwrap(model), global_step)
-                log_loss_ratios(writer, components, global_step)
+                loss_weights = {
+                    "plcmse": cfg.loss.plcmse_weight,
+                    "mag_l1": cfg.loss.mag_l1_weight,
+                    "time_l1": cfg.loss.time_l1_weight,
+                    "sisdr": cfg.loss.sisdr_weight,
+                    "delay": cfg.loss.delay_weight,
+                    "entropy": cfg.loss.entropy_weight,
+                }
+                log_loss_ratios(writer, components, global_step, weights=loss_weights)
 
             for k in epoch_losses:
                 epoch_losses[k] += components[k].item()
@@ -454,9 +476,9 @@ def train(cfg, resume=None, dummy=False):
         # Epoch averages
         for k in epoch_losses:
             epoch_losses[k] /= max(n_batches, 1)
-            writer.add_scalar(f"train_epoch/{k}", epoch_losses[k], epoch)
+            add_scalar_with_help(writer, f"train_epoch/{k}", epoch_losses[k], epoch)
         epoch_delay_acc /= max(n_batches, 1)
-        writer.add_scalar("train_epoch/delay_acc", epoch_delay_acc, epoch)
+        add_scalar_with_help(writer, "train_epoch/delay_acc", epoch_delay_acc, epoch)
 
         # Weight histograms every 5 epochs
         if (epoch + 1) % 5 == 0:
@@ -493,6 +515,13 @@ def train(cfg, resume=None, dummy=False):
                 entropy = compute_attention_entropy(delay_dist)
                 components["entropy"] = entropy
 
+                # Update total so loss_ratio/* metrics use the true total
+                components["total"] = (
+                    components["total"]
+                    + cfg.loss.delay_weight * delay_loss
+                    + cfg.loss.entropy_weight * entropy
+                )
+
                 # ERLE
                 length = clean_wav.shape[-1]
                 mic_wav = batch["mic_wav"].to(device, non_blocking=True)
@@ -510,11 +539,11 @@ def train(cfg, resume=None, dummy=False):
 
         for k in val_losses:
             val_losses[k] /= max(n_val, 1)
-            writer.add_scalar(f"val/{k}", val_losses[k], epoch)
+            add_scalar_with_help(writer, f"val/{k}", val_losses[k], epoch)
         val_delay_acc /= max(n_val, 1)
         val_erle /= max(n_val, 1)
-        writer.add_scalar("val/delay_acc", val_delay_acc, epoch)
-        writer.add_scalar("val/erle_db", val_erle, epoch)
+        add_scalar_with_help(writer, "val/delay_acc", val_delay_acc, epoch)
+        add_scalar_with_help(writer, "val/erle_db", val_erle, epoch)
 
         # Step plateau scheduler on val loss (only after warmup)
         if warmup_done:

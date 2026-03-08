@@ -12,8 +12,9 @@ noise suppression, and dereverberation.
 
 Phases 0-4 complete, Phase 5 (GGML) has export + skeleton C++ + comparison
 infrastructure. Model verified (7.97M params, causality OK, all gradients flow,
-AMP works). Data pipeline verified with DNS5 real data (80K clean, 24K noise,
-60K RIR files). Training via Docker with squashfuse-mounted datasets.
+AMP works). Data pipeline verified with DNS5 real data (157K clean, 64K noise,
+60K RIR files). All training data packed into a single squashfs image
+(dns5.sqsh), mounted via Docker entrypoint.
 Evaluation script produces ERLE/PESQ/STOI/segSNR metrics, spectrograms, and
 delay heatmaps. GGUF export with BN folding verified (max error 3.9e-6).
 
@@ -52,12 +53,15 @@ deepvqe/
     losses.py                   # Loss functions
     metrics.py                  # ERLE, PESQ, STOI
     stft.py                     # STFT/iSTFT helpers
+    viz.py                      # Visualization helpers (spectrograms, delays, activations)
   data/
     dataset.py                  # AECDataset class
     synth.py                    # Online audio synthesis
   scripts/
     entrypoint.sh               # Docker entrypoint (mounts .sqsh datasets)
     download_dns5_minimal.sh    # Download DNS5 subset
+  notebooks/
+    explore_training.ipynb      # Interactive pipeline exploration notebook
   train.py                      # Training script
   eval.py                       # Evaluation script
   test_model.py                 # Model verification tests
@@ -103,7 +107,7 @@ deepvqe/
 - [x] `test_data.py` — Verification script (5/5 tests pass)
 - [x] Shapes correct (B,257,T,2)
 - [x] Cross-correlation peak matches specified delay exactly
-- [x] DNS5 data: 80K clean, 24K noise, 60K RIR (48kHz → 16kHz resampled)
+- [x] DNS5 data: 157K clean, 64K noise, 60K RIR (48kHz → 16kHz resampled)
 - [ ] SER matches within 1 dB
 - [ ] Spectrograms visualized for random examples
 - [ ] Delay distribution uniform (not concentrated near zero)
@@ -145,15 +149,19 @@ deepvqe/
 # Download DNS5 minimal subset (~25GB download, ~50GB unpacked)
 ./scripts/download_dns5_minimal.sh datasets_fullband
 
-# Pack clean speech into squashfs for compressed storage
-mksquashfs datasets_fullband/clean_fullband clean_fullband.sqsh -comp zstd
-mv clean_fullband.sqsh datasets_fullband/sqsh/
+# Pack all training data into a single squashfs image.
+# Create a staging directory with hardlinks (no extra disk space):
+mkdir -p datasets_fullband/_dns5_staging
+cp -rl datasets_fullband/clean_fullband datasets_fullband/_dns5_staging/clean
+cp -rl datasets_fullband/datasets_fullband/noise_fullband datasets_fullband/_dns5_staging/noise
+cp -rl datasets_fullband/datasets_fullband/impulse_responses datasets_fullband/_dns5_staging/impulse_responses
 
-# The Docker entrypoint auto-mounts .sqsh files to /data/<name>
-# Config paths are pre-set for the container layout:
-#   clean_dir: /data/clean_fullband  (mounted from sqsh)
-#   noise_dir: datasets_fullband/datasets_fullband/noise_fullband
-#   rir_dir:   datasets_fullband/datasets_fullband/impulse_responses
+mksquashfs datasets_fullband/_dns5_staging datasets_fullband/sqsh/dns5.sqsh \
+    -comp zstd -Xcompression-level 3
+rm -rf datasets_fullband/_dns5_staging
+
+# The Docker entrypoint auto-mounts .sqsh files to /data/<name>.
+# dns5.sqsh → /data/dns5/{clean,noise,impulse_responses}
 ```
 
 ## Paper Reference Results
@@ -208,6 +216,20 @@ Multi-component (paper does not disclose, this is our design):
 5. **Entropy regularization** (weight=0.01): Sharpens attention distribution
 
 Hard training gates (after epoch 20): delay accuracy ≥ 70%, ERLE ≥ 3 dB.
+
+## Visualization & Debugging
+
+`src/viz.py` provides helpers used during training and interactive exploration:
+
+- **Spectrogram comparison** — mic vs enhanced vs clean spectrograms
+- **Delay distribution** — AlignBlock attention heatmaps with ground-truth overlay
+- **CCM mask decomposition** — visualize the 3×3 complex convolving mask channels
+- **Encoder activations** — per-block activation heatmaps and statistics
+- **TensorBoard integration** — weight histograms, per-layer gradient norms, loss ratios
+
+`notebooks/explore_training.ipynb` walks through the full pipeline interactively
+(STFT, encoder, AlignBlock, bottleneck, decoder, CCM, loss). Works with
+`DummyAECDataset` (no data needed) or a trained checkpoint.
 
 ## References
 

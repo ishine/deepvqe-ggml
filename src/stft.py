@@ -1,8 +1,11 @@
+import functools
+
 import torch
 
 
+@functools.lru_cache(maxsize=4)
 def make_window(n_fft, device=None):
-    """Create sqrt-Hann window for perfect reconstruction."""
+    """Create sqrt-Hann window for perfect reconstruction (cached)."""
     return torch.sqrt(torch.hann_window(n_fft, device=device) + 1e-12)
 
 

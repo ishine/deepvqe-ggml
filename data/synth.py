@@ -18,13 +18,12 @@ import soundfile as sf
 from scipy.signal import fftconvolve, resample_poly
 
 
-def _load_random_audio(file_list, target_len, sr=16000):
-    """Load a random audio file and extract a segment of target_len samples.
+def _load_audio(path, target_len, sr=16000):
+    """Load an audio file and extract a random segment of target_len samples.
 
     Uses partial reads via sf.read(start, stop) to avoid loading entire files
     into memory, which matters for datasets with long recordings.
     """
-    path = random.choice(file_list)
     info = sf.info(path)
     file_sr = info.samplerate
     total_frames = info.frames
@@ -51,12 +50,19 @@ def _load_random_audio(file_list, target_len, sr=16000):
 
     # Pad or crop to target length
     if len(audio) < target_len:
-        audio = np.pad(audio, (0, target_len - len(audio)))
+        pad_total = target_len - len(audio)
+        pad_left = random.randint(0, pad_total)
+        audio = np.pad(audio, (pad_left, pad_total - pad_left))
     elif len(audio) > target_len:
         start = random.randint(0, len(audio) - target_len)
         audio = audio[start : start + target_len]
 
     return audio.astype(np.float32)
+
+
+def _load_random_audio(file_list, target_len, sr=16000):
+    """Load a random audio file from the list."""
+    return _load_audio(random.choice(file_list), target_len, sr)
 
 
 def _load_random_rir(rir_list):
@@ -91,7 +97,7 @@ def _scale_to_ser(nearend, echo, ser_db):
 
 
 def synthesize_example(
-    clean_files,
+    clean_path,
     noise_files,
     farend_files,
     rir_files=None,
@@ -104,6 +110,11 @@ def synthesize_example(
 ):
     """Synthesize a single AEC training example.
 
+    Args:
+        clean_path: path to the clean near-end speech file
+        noise_files: list of noise file paths (one chosen randomly)
+        farend_files: list of far-end file paths (one chosen randomly)
+
     Returns:
         mic: (N,) microphone signal
         ref: (N,) far-end reference signal (before RIR)
@@ -111,7 +122,7 @@ def synthesize_example(
         metadata: dict with delay_ms, snr_db, ser_db, scenario
     """
     # Sample audio
-    nearend = _load_random_audio(clean_files, target_len, sr)
+    nearend = _load_audio(clean_path, target_len, sr)
     farend = _load_random_audio(farend_files, target_len, sr)
     noise = _load_random_audio(noise_files, target_len, sr)
 

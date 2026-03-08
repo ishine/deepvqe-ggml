@@ -71,7 +71,7 @@ class DataConfig:
     delay_range: Tuple[float, float] = (0, 320)
     max_delay_frames: int = 32
     single_talk_prob: float = 0.2
-    num_train: int = 10000
+    num_train: int = 10000  # only used for DummyAECDataset
     num_val: int = 1000
 
 

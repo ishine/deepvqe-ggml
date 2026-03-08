@@ -2,32 +2,15 @@
 
 import glob
 import os
+import random
+
 import numpy as np
 import torch
-import scipy.signal
 from src.config import load_config
 from src.model import DeepVQEAEC
 from src.stft import stft, istft
+from data.synth import _load_audio
 from train import load_checkpoint
-
-
-def load_wav_16k(path, target_len, rng):
-    """Load a wav file, resample to 16kHz, crop/pad to target_len."""
-    import soundfile as sf
-    audio, sr = sf.read(path, dtype="float32")
-    if audio.ndim > 1:
-        audio = audio[:, 0]
-    if sr != 16000:
-        audio = scipy.signal.resample_poly(audio, 16000, sr).astype(np.float32)
-    # Random crop or zero-pad
-    if len(audio) >= target_len:
-        start = rng.randint(0, len(audio) - target_len + 1)
-        audio = audio[start : start + target_len]
-    else:
-        pad = np.zeros(target_len, dtype=np.float32)
-        pad[: len(audio)] = audio
-        audio = pad
-    return audio
 
 
 def main():
@@ -56,8 +39,7 @@ def main():
 
     # Find clean speech files
     clean_dirs = [
-        "/data/clean_fullband",  # Docker sqsh mount
-        "/workspace/deepvqe/datasets_fullband/clean_fullband",
+        "/data/dns5/clean",  # Docker sqsh mount
     ]
     clean_files = []
     for d in clean_dirs:
@@ -69,6 +51,7 @@ def main():
     print(f"Found {len(clean_files)} clean speech files")
 
     rng = np.random.RandomState(123)
+    random.seed(123)
 
     # Pick 10 random clean files for near-end, 10 for far-end
     n_trials = 10
@@ -82,8 +65,8 @@ def main():
     delay_results = {d: [] for d in delay_ms_list}
 
     for trial in range(n_trials):
-        near = load_wav_16k(clean_files[near_idxs[trial]], target_len, rng)
-        far = load_wav_16k(clean_files[far_idxs[trial]], target_len, rng)
+        near = _load_audio(clean_files[near_idxs[trial]], target_len)
+        far = _load_audio(clean_files[far_idxs[trial]], target_len)
 
         # Normalize
         near = near / (np.max(np.abs(near)) + 1e-8) * 0.3

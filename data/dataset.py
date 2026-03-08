@@ -80,38 +80,50 @@ class AECDataset(Dataset):
             cfg: Config object with data and audio sections
             split: 'train' or 'val'
         """
-        self.cfg = cfg
         self.sr = cfg.audio.sample_rate
         self.n_fft = cfg.audio.n_fft
         self.hop_length = cfg.audio.hop_length
         self.target_len = int(cfg.training.clip_length_sec * self.sr)
+        self.snr_range = tuple(cfg.data.snr_range)
+        self.ser_range = tuple(cfg.data.ser_range)
+        self.delay_range = tuple(cfg.data.delay_range)
+        self.single_talk_prob = cfg.data.single_talk_prob
 
-        self.clean_files = _collect_audio_files(cfg.data.clean_dir)
+        all_clean = _collect_audio_files(cfg.data.clean_dir)
         self.noise_files = _collect_audio_files(cfg.data.noise_dir)
         self.farend_files = _collect_audio_files(cfg.data.farend_dir)
         self.rir_files = _collect_audio_files(cfg.data.rir_dir) or None
 
-        # If farend_dir not specified, use clean_dir
+        # If farend_dir not specified, use clean_dir (full pool, no split)
         if not self.farend_files:
-            self.farend_files = self.clean_files
+            self.farend_files = all_clean
 
-        self.length = cfg.data.num_train if split == "train" else cfg.data.num_val
+        # Hold out num_val clean files for validation (deterministic split)
+        num_val = cfg.data.num_val
+        if split == "train":
+            self.clean_files = all_clean[num_val:]
+            self.length = len(self.clean_files)
+        else:
+            self.clean_files = all_clean[:num_val]
+            self.length = len(self.clean_files)
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, idx):
+        clean_path = self.clean_files[idx]
+
         mic, ref, clean, metadata = synthesize_example(
-            clean_files=self.clean_files,
+            clean_path=clean_path,
             noise_files=self.noise_files,
             farend_files=self.farend_files,
             rir_files=self.rir_files,
             target_len=self.target_len,
             sr=self.sr,
-            snr_range=tuple(self.cfg.data.snr_range),
-            ser_range=tuple(self.cfg.data.ser_range),
-            delay_range=tuple(self.cfg.data.delay_range),
-            single_talk_prob=self.cfg.data.single_talk_prob,
+            snr_range=self.snr_range,
+            ser_range=self.ser_range,
+            delay_range=self.delay_range,
+            single_talk_prob=self.single_talk_prob,
         )
 
         # Convert to tensors and compute STFTs

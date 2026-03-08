@@ -75,6 +75,27 @@ class DeepVQEAEC(nn.Module):
         # Complex Convolving Mask
         self.ccm = CCM()
 
+        self._init_ccm_identity()
+
+    def _init_ccm_identity(self):
+        """Initialize dec1 deconv bias so the CCM mask starts as identity (passthrough).
+
+        The 27-ch mask is reshaped as (3 basis, 9 kernel).  Basis vectors
+        v_real=[1,-0.5,-0.5] and v_imag=[0,√3/2,-√3/2] sum to zero, so
+        default init (similar values across the 3 groups) produces near-zero
+        mask magnitude.  Fix: set the center kernel element (idx 4) of the
+        first basis (r=0, v_real=1, v_imag=0) to 1, giving H_real[center]=1.
+
+        SubpixelConv2d stores 54 channels (27×2 for sub-pixel shuffle).
+        Output channel c comes from conv channels c (even freq) and c+27
+        (odd freq), so we set bias[4] = bias[31] = 1.
+        """
+        conv = self.dec1.deconv.conv
+        with torch.no_grad():
+            conv.bias.zero_()
+            conv.bias[4] = 1.0   # r=0, kernel center, even freq bins
+            conv.bias[31] = 1.0  # r=0, kernel center, odd freq bins
+
     def forward(self, mic_stft, ref_stft, return_delay=False):
         """
         mic_stft: (B, 257, T, 2) — microphone STFT

@@ -45,16 +45,15 @@ loss:
   power_law_c: 0.5
 
 data:
-  clean_dir: "/data/clean_fullband"
-  noise_dir: "datasets_fullband/datasets_fullband/noise_fullband"
-  rir_dir: "datasets_fullband/datasets_fullband/impulse_responses"
+  clean_dir: "/data/dns5/clean"
+  noise_dir: "/data/dns5/noise"
+  rir_dir: "/data/dns5/impulse_responses"
   farend_dir: ""      # empty = reuse clean_dir
   snr_range: [5, 40]
   ser_range: [-10, 10]
   delay_range: [0, 320]  # ms
   max_delay_frames: 32   # matches dmax
   single_talk_prob: 0.2
-  num_train: 10000
   num_val: 1000
 
 eval:
