@@ -83,18 +83,23 @@ class DeepVQEAEC(nn.Module):
         The 27-ch mask is reshaped as (3 basis, 9 kernel).  Basis vectors
         v_real=[1,-0.5,-0.5] and v_imag=[0,√3/2,-√3/2] sum to zero, so
         default init (similar values across the 3 groups) produces near-zero
-        mask magnitude.  Fix: set the center kernel element (idx 4) of the
+        mask magnitude.  Fix: set the current-frame kernel element of the
         first basis (r=0, v_real=1, v_imag=0) to 1, giving H_real[center]=1.
+
+        CCM uses causal ZeroPad2d([1,1,2,0]) with 3×3 kernel:
+          m=0: t-2, m=1: t-1, m=2: t (current frame)
+          n=0: f-1, n=1: f (current freq), n=2: f+1
+        So current (t, f) = kernel index 2*3+1 = 7, NOT 4.
 
         SubpixelConv2d stores 54 channels (27×2 for sub-pixel shuffle).
         Output channel c comes from conv channels c (even freq) and c+27
-        (odd freq), so we set bias[4] = bias[31] = 1.
+        (odd freq), so we set bias[7] = bias[34] = 1.
         """
         conv = self.dec1.deconv.conv
         with torch.no_grad():
             conv.bias.zero_()
-            conv.bias[4] = 1.0   # r=0, kernel center, even freq bins
-            conv.bias[31] = 1.0  # r=0, kernel center, odd freq bins
+            conv.bias[7] = 1.0   # r=0, current (t,f), even freq bins
+            conv.bias[34] = 1.0  # r=0, current (t,f), odd freq bins
 
     def forward(self, mic_stft, ref_stft, return_delay=False):
         """

@@ -95,8 +95,12 @@ test-model: build ## Run model unit tests
 test-data: build ## Run data pipeline tests
 	$(DOCKER_RUN) $(IMAGE) python test_data.py
 
+.PHONY: test-blocks
+test-blocks: build ## Run block-level verification tests
+	$(DOCKER_RUN) $(IMAGE) python test_blocks.py
+
 .PHONY: tests
-tests: test-model test-data ## Run all unit tests
+tests: test-model test-data test-blocks ## Run all unit tests
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 

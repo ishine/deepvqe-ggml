@@ -1,11 +1,18 @@
 """Loss functions for DeepVQE training.
 
-Multi-component loss:
-1. Power-law compressed MSE (weight=1.0)
-2. Magnitude L1 (weight=0.5)
-3. Time-domain L1 (weight=0.5)
-4. SI-SDR (weight=0.0, disabled — spectral losses drive AEC training)
-5. Mask magnitude regularizer (penalizes deviation from unity)
+Current strategy: PLC-MSE only.  Start with the single most informative loss
+and get reasonable results before adding auxiliary terms.  PLC-MSE applies
+power-law compression (|X|^c) before MSE on real/imag STFT, which balances
+loud and quiet T-F bins and is sensitive to both magnitude and phase.
+
+Available components (enable via config weights):
+1. Power-law compressed MSE  (plcmse_weight, default 1.0)
+2. Magnitude L1              (mag_l1_weight, default 0.0)
+3. Time-domain L1            (time_l1_weight, default 0.0)
+4. SI-SDR                    (sisdr_weight, default 0.0)
+5. Mask magnitude regularizer (mask_reg_weight, default 0.0)
+
+Delay supervision and entropy penalty are in train.py (delay_weight, entropy_weight).
 """
 
 import numpy as np
@@ -58,13 +65,13 @@ def si_sdr(pred, target):
 
 
 def mask_magnitude_regularizer(d1):
-    """Penalize CCM mask magnitude deviating from 1 (identity/passthrough).
+    """Penalize CCM mask magnitude deviating from 3×3 identity kernel.
 
-    For each of the 9 kernel taps, the ideal identity mask has magnitude 1
-    at the center tap and 0 elsewhere.  We use a simpler formulation: pull
-    the *mean* magnitude (across all 9 taps) toward 1.  This prevents both
-    over-suppression (mag→0) and explosion (mag→∞) without micro-managing
-    individual taps.
+    CCM uses causal ZeroPad2d([1,1,2,0]) with 3×3 kernel:
+      m=0: t-2, m=1: t-1, m=2: t (current frame)
+      n=0: f-1, n=1: f (current freq), n=2: f+1
+    Current (t,f) = kernel index 2*3+1 = 7.  For identity convolution,
+    tap 7 should have magnitude 1 and all other taps magnitude 0.
 
     Args:
         d1: (B, 27, T, F) raw 27-channel decoder output (before CCM)
@@ -73,8 +80,9 @@ def mask_magnitude_regularizer(d1):
         Scalar regularization loss.
     """
     mag = mask_mag_from_raw(d1)  # (B, 9, T, F)
-    mean_mag = mag.mean(dim=1)  # (B, T, F) — average over 9 kernel taps
-    return torch.mean((mean_mag - 1.0) ** 2)
+    center = mag[:, 7]  # (B, T, F) — current (t, f)
+    off_center = torch.cat([mag[:, :7], mag[:, 8:]], dim=1)  # (B, 8, T, F)
+    return torch.mean((center - 1.0) ** 2) + torch.mean(off_center ** 2)
 
 
 class DeepVQELoss(nn.Module):
