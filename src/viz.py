@@ -412,13 +412,13 @@ METRIC_HELP = {
         "Lower the temperature faster or increase entropy_weight."
     ),
     "train/mask_reg": (
-        "**Mask magnitude regularizer** — MSE between mean CCM mask magnitude "
-        "and 1.0 (identity/passthrough).  \n"
+        "**Mask magnitude regularizer** — pulls CCM mask toward 3×3 identity "
+        "kernel (center tap magnitude→1, off-center taps→0).  \n"
         "Prevents the mask from collapsing to zero (over-suppression) or "
         "exploding (amplification).  \n\n"
-        "**Healthy range:** 0.1-0.5 early, <0.1 when converged.  \n"
-        "**Watch for:** If this stays high (>1.0), the model is struggling to "
-        "produce unit-magnitude masks. If it drops to 0 immediately, the "
+        "**Healthy range:** 0.5-2.0 early, <0.5 when converged.  \n"
+        "**Watch for:** If this stays high (>3.0), the model is struggling to "
+        "produce identity-like masks. If it drops to 0 immediately, the "
         "weight may be too high (model just outputs identity, ignoring other losses)."
     ),
     "train/lr": (

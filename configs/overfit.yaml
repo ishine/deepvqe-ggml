@@ -1,0 +1,71 @@
+# Overfitting test: train on a tiny fixed dataset to verify the model
+# can perfectly reconstruct clean signals.
+#
+# Usage:  python train.py --config configs/overfit.yaml --dummy
+#
+# Expected: train and val loss should both converge toward zero.
+# If they don't, the model architecture or training loop has a bug.
+
+model:
+  mic_channels: [2, 64, 128, 128, 128, 128]
+  far_channels: [2, 32, 128]
+  align_hidden: 32
+  dmax: 32
+  align_temp_start: 1.0
+  align_temp_end: 0.1
+  align_temp_epochs: 50
+  power_law_c: 0.3
+
+audio:
+  sample_rate: 16000
+  n_fft: 512
+  hop_length: 256
+  n_freqs: 257
+
+training:
+  batch_size: 8
+  grad_accum_steps: 1
+  num_workers: 0            # tiny dataset, no need for workers
+  lr: 1.0e-3
+  weight_decay: 0.0         # no regularization for overfit test
+  epochs: 500
+  clip_length_sec: 3.0
+  amp: false               # FP32 for overfit test — rules out BF16 precision floor
+  grad_clip: 5.0
+  warmup_epochs: 0
+  checkpoint_every: 50
+  keep_checkpoints: 3
+  early_stop_patience: 0    # disabled
+  early_stop_min_delta: 0.0
+  delay_acc_min: 0.0        # disable gate
+  erle_min_db: -100.0       # disable gate
+  lr_patience: 100          # effectively disabled
+  lr_factor: 0.5
+  lr_min: 1.0e-6
+
+loss:
+  plcmse_weight: 1.0
+  mag_l1_weight: 0.0
+  time_l1_weight: 0.0
+  sisdr_weight: 0.0
+  delay_weight: 0.0
+  entropy_weight: 0.0
+  mask_reg_weight: 0.0
+  power_law_c: 0.5
+
+data:
+  num_train: 8              # tiny: fits in one batch
+  num_val: 8                # same indices → same examples as train
+  clean_dir: ""
+  noise_dir: ""
+  rir_dir: ""
+  farend_dir: ""
+  snr_range: [5, 40]
+  ser_range: [-10, 10]
+  delay_range: [0, 320]
+  max_delay_frames: 32
+  single_talk_prob: 0.2
+
+paths:
+  checkpoint_dir: checkpoints/overfit
+  log_dir: logs/overfit

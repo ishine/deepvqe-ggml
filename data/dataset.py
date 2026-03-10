@@ -164,12 +164,32 @@ class DummyAECDataset(Dataset):
     def __len__(self):
         return self.length
 
+    @staticmethod
+    def _tonal_signal(rng, length, sr, n_harmonics=15, amplitude=0.1):
+        """Generate a speech-like tonal signal (sum of harmonics + filtered noise).
+
+        White Gaussian noise has independent STFT bins, making it adversarial
+        for convolutional architectures that assume spectral smoothness.
+        Tonal signals have smooth spectral envelopes like real speech.
+        """
+        t = np.arange(length, dtype=np.float32) / sr
+        f0 = rng.uniform(80, 300)  # fundamental frequency
+        signal = np.zeros(length, dtype=np.float32)
+        for h in range(1, n_harmonics + 1):
+            freq = f0 * h
+            if freq > sr / 2:
+                break
+            amp = amplitude * rng.uniform(0.2, 1.0) / h  # harmonic roll-off
+            phase = rng.uniform(0, 2 * np.pi)
+            signal += amp * np.sin(2 * np.pi * freq * t + phase).astype(np.float32)
+        return signal
+
     def __getitem__(self, idx):
         rng = np.random.RandomState(idx)
 
-        # Generate signals
-        clean = rng.randn(self.target_len).astype(np.float32) * 0.1
-        farend = rng.randn(self.target_len).astype(np.float32) * 0.1
+        # Generate speech-like tonal signals (smooth spectral structure)
+        clean = self._tonal_signal(rng, self.target_len, self.sr)
+        farend = self._tonal_signal(rng, self.target_len, self.sr)
         noise = rng.randn(self.target_len).astype(np.float32) * 0.01
 
         # Echo with delay

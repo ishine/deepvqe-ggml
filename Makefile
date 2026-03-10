@@ -68,6 +68,11 @@ train-full: build ## Train on full dataset (set DATA_DIR= to override)
 	$(DOCKER_RUN) $(IMAGE) \
 		python train.py --config $(CONFIG) $(EXTRA_ARGS)
 
+.PHONY: overfit
+overfit: build ## Overfit test: 8 tonal examples, loss should → 0
+	$(DOCKER_RUN) $(IMAGE) \
+		python train.py --config configs/overfit.yaml --dummy $(EXTRA_ARGS)
+
 # ── Evaluation & Export ──────────────────────────────────────────────────────
 
 CHECKPOINT ?= checkpoints/best.pt

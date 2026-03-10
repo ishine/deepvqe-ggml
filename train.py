@@ -388,10 +388,19 @@ def train(cfg, resume=None, dummy=False):
         align.temperature = temperature
         add_scalar_with_help(writer, "train/temperature", temperature, epoch)
 
-        epoch_losses = {
-            "total": 0, "plcmse": 0, "mag_l1": 0, "time_l1": 0,
-            "sisdr": 0, "delay": 0, "entropy": 0, "mask_reg": 0,
-        }
+        epoch_losses = {"total": 0, "plcmse": 0}
+        if cfg.loss.mag_l1_weight > 0:
+            epoch_losses["mag_l1"] = 0
+        if cfg.loss.time_l1_weight > 0:
+            epoch_losses["time_l1"] = 0
+        if cfg.loss.sisdr_weight > 0:
+            epoch_losses["sisdr"] = 0
+        if cfg.loss.delay_weight > 0:
+            epoch_losses["delay"] = 0
+        if cfg.loss.entropy_weight > 0:
+            epoch_losses["entropy"] = 0
+        if cfg.loss.mask_reg_weight > 0:
+            epoch_losses["mask_reg"] = 0
         epoch_delay_acc = 0
         n_batches = 0
         optimizer.zero_grad()
@@ -412,21 +421,21 @@ def train(cfg, resume=None, dummy=False):
                 delay_loss, delay_acc = compute_delay_loss(
                     delay_dist, delay_samp, cfg.audio.hop_length, cfg.model.dmax,
                 )
-                components["delay"] = delay_loss
-                loss = loss + cfg.loss.delay_weight * delay_loss
+                if cfg.loss.delay_weight > 0:
+                    components["delay"] = delay_loss
+                    loss = loss + cfg.loss.delay_weight * delay_loss
 
                 # Entropy penalty on delay attention
                 if cfg.loss.entropy_weight > 0:
                     entropy = compute_attention_entropy(delay_dist)
                     components["entropy"] = entropy
                     loss = loss + cfg.loss.entropy_weight * entropy
-                else:
-                    components["entropy"] = torch.tensor(0.0, device=device)
 
                 # Mask magnitude regularizer
-                mask_reg = mask_magnitude_regularizer(mask_raw)
-                components["mask_reg"] = mask_reg
-                loss = loss + cfg.loss.mask_reg_weight * mask_reg
+                if cfg.loss.mask_reg_weight > 0:
+                    mask_reg = mask_magnitude_regularizer(mask_raw)
+                    components["mask_reg"] = mask_reg
+                    loss = loss + cfg.loss.mask_reg_weight * mask_reg
 
                 # Update total so loss_ratio/* metrics use the true total
                 components["total"] = loss
@@ -448,25 +457,22 @@ def train(cfg, resume=None, dummy=False):
                 cur_lr = optimizer.param_groups[0]["lr"]
                 add_scalar_with_help(writer, "train/loss", components["total"].item(), global_step)
                 add_scalar_with_help(writer, "train/plcmse", components["plcmse"].item(), global_step)
-                add_scalar_with_help(writer, "train/mag_l1", components["mag_l1"].item(), global_step)
-                add_scalar_with_help(writer, "train/time_l1", components["time_l1"].item(), global_step)
-                add_scalar_with_help(writer, "train/sisdr", components["sisdr"].item(), global_step)
-                add_scalar_with_help(writer, "train/delay_loss", components["delay"].item(), global_step)
+                # Always log delay_acc as a diagnostic even without delay supervision
                 add_scalar_with_help(writer, "train/delay_acc", delay_acc.item(), global_step)
-                add_scalar_with_help(writer, "train/entropy", components["entropy"].item(), global_step)
-                add_scalar_with_help(writer, "train/mask_reg", components["mask_reg"].item(), global_step)
                 add_scalar_with_help(writer, "train/lr", cur_lr, global_step)
                 add_scalar_with_help(writer, "train/grad_norm", gn, global_step)
                 log_per_layer_grad_norms(writer, _unwrap(model), global_step)
-                loss_weights = {
-                    "plcmse": cfg.loss.plcmse_weight,
-                    "mag_l1": cfg.loss.mag_l1_weight,
-                    "time_l1": cfg.loss.time_l1_weight,
-                    "sisdr": cfg.loss.sisdr_weight,
-                    "delay": cfg.loss.delay_weight,
-                    "entropy": cfg.loss.entropy_weight,
-                    "mask_reg": cfg.loss.mask_reg_weight,
-                }
+                # Log active auxiliary components
+                loss_weights = {"plcmse": cfg.loss.plcmse_weight}
+                for key, w in [("mag_l1", cfg.loss.mag_l1_weight),
+                               ("time_l1", cfg.loss.time_l1_weight),
+                               ("sisdr", cfg.loss.sisdr_weight),
+                               ("delay", cfg.loss.delay_weight),
+                               ("entropy", cfg.loss.entropy_weight),
+                               ("mask_reg", cfg.loss.mask_reg_weight)]:
+                    if w > 0 and key in components:
+                        add_scalar_with_help(writer, f"train/{key}", components[key].item(), global_step)
+                        loss_weights[key] = w
                 log_loss_ratios(writer, components, global_step, weights=loss_weights)
 
             for k in epoch_losses:
@@ -493,10 +499,19 @@ def train(cfg, resume=None, dummy=False):
 
         # Validation
         model.eval()
-        val_losses = {
-            "total": 0, "plcmse": 0, "mag_l1": 0, "time_l1": 0,
-            "sisdr": 0, "delay": 0, "entropy": 0, "mask_reg": 0,
-        }
+        val_losses = {"total": 0, "plcmse": 0}
+        if cfg.loss.mag_l1_weight > 0:
+            val_losses["mag_l1"] = 0
+        if cfg.loss.time_l1_weight > 0:
+            val_losses["time_l1"] = 0
+        if cfg.loss.sisdr_weight > 0:
+            val_losses["sisdr"] = 0
+        if cfg.loss.delay_weight > 0:
+            val_losses["delay"] = 0
+        if cfg.loss.entropy_weight > 0:
+            val_losses["entropy"] = 0
+        if cfg.loss.mask_reg_weight > 0:
+            val_losses["mask_reg"] = 0
         val_delay_acc = 0
         val_erle = 0
         n_val = 0
@@ -513,25 +528,23 @@ def train(cfg, resume=None, dummy=False):
                 enhanced, delay_dist, mask_raw = model(mic_stft, ref_stft, return_delay=True)
                 _, components = criterion(enhanced, clean_stft, clean_wav)
 
-                # Delay loss + accuracy
+                # Delay accuracy (always computed as diagnostic)
                 delay_loss, delay_acc = compute_delay_loss(
                     delay_dist, delay_samp, cfg.audio.hop_length, cfg.model.dmax,
                 )
-                components["delay"] = delay_loss
 
-                entropy = compute_attention_entropy(delay_dist)
-                components["entropy"] = entropy
-
-                mask_reg = mask_magnitude_regularizer(mask_raw)
-                components["mask_reg"] = mask_reg
-
-                # Update total so loss_ratio/* metrics use the true total
-                components["total"] = (
-                    components["total"]
-                    + cfg.loss.delay_weight * delay_loss
-                    + cfg.loss.entropy_weight * entropy
-                    + cfg.loss.mask_reg_weight * mask_reg
-                )
+                # Add active auxiliary losses to total
+                if cfg.loss.delay_weight > 0:
+                    components["delay"] = delay_loss
+                    components["total"] = components["total"] + cfg.loss.delay_weight * delay_loss
+                if cfg.loss.entropy_weight > 0:
+                    entropy = compute_attention_entropy(delay_dist)
+                    components["entropy"] = entropy
+                    components["total"] = components["total"] + cfg.loss.entropy_weight * entropy
+                if cfg.loss.mask_reg_weight > 0:
+                    mask_reg = mask_magnitude_regularizer(mask_raw)
+                    components["mask_reg"] = mask_reg
+                    components["total"] = components["total"] + cfg.loss.mask_reg_weight * mask_reg
 
                 # ERLE
                 length = clean_wav.shape[-1]
