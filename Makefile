@@ -104,8 +104,12 @@ test-data: build ## Run data pipeline tests
 test-blocks: build ## Run block-level verification tests
 	$(DOCKER_RUN) $(IMAGE) python test_blocks.py
 
+.PHONY: test-ccm
+test-ccm: build ## Run CCM learning isolation tests
+	$(DOCKER_RUN) $(IMAGE) python test_ccm_learning.py
+
 .PHONY: tests
-tests: test-model test-data test-blocks ## Run all unit tests
+tests: test-model test-data test-blocks test-ccm ## Run all unit tests
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 
