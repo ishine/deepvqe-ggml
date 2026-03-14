@@ -149,16 +149,19 @@ class AECDataset(Dataset):
 class DummyAECDataset(Dataset):
     """Synthetic dataset for testing (no audio files needed).
 
-    Generates random signals with known delay for verification.
+    Generates amplitude-modulated tonal signals with per-example random
+    delay for verification.  The amplitude envelope gives temporal structure
+    so the AlignBlock can detect the delay from STFT magnitude patterns
+    (stationary tones have identical frames, making delay undetectable).
     """
 
     def __init__(self, length=100, target_len=48000, n_fft=512, hop_length=256,
-                 delay_samples=0, sr=16000):
+                 delay_range=(0, 0), sr=16000):
         self.length = length
         self.target_len = target_len
         self.n_fft = n_fft
         self.hop_length = hop_length
-        self.delay_samples = delay_samples
+        self.delay_range = delay_range  # (min_samples, max_samples)
         self.sr = sr
 
     def __len__(self):
@@ -166,11 +169,11 @@ class DummyAECDataset(Dataset):
 
     @staticmethod
     def _tonal_signal(rng, length, sr, n_harmonics=15, amplitude=0.1):
-        """Generate a speech-like tonal signal (sum of harmonics + filtered noise).
+        """Generate an amplitude-modulated tonal signal.
 
-        White Gaussian noise has independent STFT bins, making it adversarial
-        for convolutional architectures that assume spectral smoothness.
-        Tonal signals have smooth spectral envelopes like real speech.
+        Sum of harmonics (smooth spectral structure like speech) multiplied
+        by a random smooth envelope (3-6 bumps over the signal duration).
+        The envelope gives temporal variation so delay estimation can work.
         """
         t = np.arange(length, dtype=np.float32) / sr
         f0 = rng.uniform(80, 300)  # fundamental frequency
@@ -182,21 +185,41 @@ class DummyAECDataset(Dataset):
             amp = amplitude * rng.uniform(0.2, 1.0) / h  # harmonic roll-off
             phase = rng.uniform(0, 2 * np.pi)
             signal += amp * np.sin(2 * np.pi * freq * t + phase).astype(np.float32)
+
+        # Amplitude modulation: smooth random envelope with 3-6 bumps
+        n_bumps = rng.randint(3, 7)
+        env_freqs = rng.uniform(0.5, 3.0, size=n_bumps)
+        env_phases = rng.uniform(0, 2 * np.pi, size=n_bumps)
+        envelope = np.ones(length, dtype=np.float32) * 0.3  # baseline
+        for ef, ep in zip(env_freqs, env_phases):
+            envelope += (0.7 / n_bumps) * (1 + np.sin(2 * np.pi * ef * t + ep).astype(np.float32))
+        envelope = np.clip(envelope, 0.0, 1.0)
+        signal *= envelope
         return signal
 
     def __getitem__(self, idx):
         rng = np.random.RandomState(idx)
 
-        # Generate speech-like tonal signals (smooth spectral structure)
+        # Generate amplitude-modulated tonal signals
         clean = self._tonal_signal(rng, self.target_len, self.sr)
         farend = self._tonal_signal(rng, self.target_len, self.sr)
         noise = rng.randn(self.target_len).astype(np.float32) * 0.01
 
+        # Per-example random delay (quantized to hop_length for clean frame alignment)
+        delay_lo, delay_hi = self.delay_range
+        if delay_hi > delay_lo:
+            delay_samples = rng.randint(delay_lo, delay_hi + 1)
+            # Quantize to hop_length so ground truth aligns to STFT frames
+            delay_samples = int(round(delay_samples / self.hop_length) * self.hop_length)
+            delay_samples = max(delay_lo, min(delay_hi, delay_samples))
+        else:
+            delay_samples = delay_lo
+
         # Echo with delay
         echo = np.zeros_like(farend)
-        if self.delay_samples < self.target_len:
-            end = min(self.target_len, self.target_len - self.delay_samples)
-            echo[self.delay_samples:] = farend[:end] * 0.5
+        if delay_samples < self.target_len:
+            end = min(self.target_len, self.target_len - delay_samples)
+            echo[delay_samples:] = farend[:end] * 0.5
 
         mic = clean + echo + noise
 
@@ -214,10 +237,10 @@ class DummyAECDataset(Dataset):
             "clean_stft": clean_stft,
             "mic_wav": mic_t.squeeze(0),
             "clean_wav": clean_t.squeeze(0),
-            "delay_samples": self.delay_samples,
+            "delay_samples": delay_samples,
             "metadata": {
-                "delay_ms": self.delay_samples / self.sr * 1000,
-                "delay_samples": self.delay_samples,
+                "delay_ms": delay_samples / self.sr * 1000,
+                "delay_samples": delay_samples,
                 "snr_db": 20.0,
                 "ser_db": 6.0,
                 "scenario": "double_talk",

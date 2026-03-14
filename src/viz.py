@@ -374,6 +374,15 @@ METRIC_HELP = {
         "**Note:** SI-SDR can dominate training and cause instability with "
         "AEC tasks, which is why it's disabled in favor of spectral losses."
     ),
+    "train/smooth_l1": (
+        "**SmoothL1 (Huber) loss** on the time-domain waveform.  \n"
+        "Blends L2 for small errors (|e| < beta) and L1 for large errors, "
+        "giving robustness to outliers while maintaining smooth gradients "
+        "near zero.  \n\n"
+        "**Advantage over PLC-MSE:** operates on the waveform directly, "
+        "so inaudible high-frequency spectral residuals don't inflate the loss.  \n"
+        "**Healthy range:** depends on signal amplitude; should decrease steadily."
+    ),
     "train/delay_loss": (
         "**Delay cross-entropy** — supervision for the AlignBlock.  \n"
         "Measures how well the attention distribution peaks at the correct "

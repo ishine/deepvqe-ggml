@@ -1,16 +1,12 @@
 """Loss functions for DeepVQE training.
 
-Current strategy: PLC-MSE only.  Start with the single most informative loss
-and get reasonable results before adding auxiliary terms.  PLC-MSE applies
-power-law compression (|X|^c) before MSE on real/imag STFT, which balances
-loud and quiet T-F bins and is sensitive to both magnitude and phase.
-
 Available components (enable via config weights):
 1. Power-law compressed MSE  (plcmse_weight, default 1.0)
 2. Magnitude L1              (mag_l1_weight, default 0.0)
 3. Time-domain L1            (time_l1_weight, default 0.0)
 4. SI-SDR                    (sisdr_weight, default 0.0)
 5. Mask magnitude regularizer (mask_reg_weight, default 0.0)
+6. SmoothL1 on waveform      (smooth_l1_weight, default 0.0)
 
 Delay supervision and entropy penalty are in train.py (delay_weight, entropy_weight).
 """
@@ -94,6 +90,8 @@ class DeepVQELoss(nn.Module):
         mag_l1_weight=0.5,
         time_l1_weight=0.5,
         sisdr_weight=0.5,
+        smooth_l1_weight=0.0,
+        smooth_l1_beta=1.0,
         power_law_c=0.5,
         n_fft=512,
         hop_length=256,
@@ -103,6 +101,8 @@ class DeepVQELoss(nn.Module):
         self.mag_l1_weight = mag_l1_weight
         self.time_l1_weight = time_l1_weight
         self.sisdr_weight = sisdr_weight
+        self.smooth_l1_weight = smooth_l1_weight
+        self.smooth_l1_beta = smooth_l1_beta
         self.c = power_law_c
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -142,26 +142,33 @@ class DeepVQELoss(nn.Module):
         mag_l1 = torch.mean(torch.abs(pred_mag - target_mag))
         components["mag_l1"] = mag_l1
 
-        # 3. Time-domain L1 and 4. SI-SDR
-        if target_wav is not None and (self.time_l1_weight > 0 or self.sisdr_weight > 0):
+        # 3. Time-domain losses (L1, SI-SDR, SmoothL1)
+        _need_wav = (self.time_l1_weight > 0 or self.sisdr_weight > 0
+                     or self.smooth_l1_weight > 0)
+        zero = torch.tensor(0.0, device=pred_stft.device)
+        if target_wav is not None and _need_wav:
             pred_wav = istft(
                 pred_stft, self.n_fft, self.hop_length, length=target_wav.shape[-1]
             )
-            time_l1 = torch.mean(torch.abs(pred_wav - target_wav)) if self.time_l1_weight > 0 else torch.tensor(0.0, device=pred_stft.device)
-            sisdr_loss = si_sdr(pred_wav, target_wav) if self.sisdr_weight > 0 else torch.tensor(0.0, device=pred_stft.device)
-            components["time_l1"] = time_l1
-            components["sisdr"] = sisdr_loss
+            time_l1 = torch.mean(torch.abs(pred_wav - target_wav)) if self.time_l1_weight > 0 else zero
+            sisdr_loss = si_sdr(pred_wav, target_wav) if self.sisdr_weight > 0 else zero
+            smooth_l1 = nn.functional.smooth_l1_loss(
+                pred_wav, target_wav, beta=self.smooth_l1_beta
+            ) if self.smooth_l1_weight > 0 else zero
         else:
-            components["time_l1"] = torch.tensor(0.0, device=pred_stft.device)
-            components["sisdr"] = torch.tensor(0.0, device=pred_stft.device)
-            time_l1 = components["time_l1"]
-            sisdr_loss = components["sisdr"]
+            time_l1 = zero
+            sisdr_loss = zero
+            smooth_l1 = zero
+        components["time_l1"] = time_l1
+        components["sisdr"] = sisdr_loss
+        components["smooth_l1"] = smooth_l1
 
         total = (
             self.plcmse_weight * plcmse
             + self.mag_l1_weight * mag_l1
             + self.time_l1_weight * time_l1
             + self.sisdr_weight * sisdr_loss
+            + self.smooth_l1_weight * smooth_l1
         )
         components["total"] = total
         return total, components
@@ -173,6 +180,8 @@ class DeepVQELoss(nn.Module):
             mag_l1_weight=cfg.loss.mag_l1_weight,
             time_l1_weight=cfg.loss.time_l1_weight,
             sisdr_weight=cfg.loss.sisdr_weight,
+            smooth_l1_weight=cfg.loss.smooth_l1_weight,
+            smooth_l1_beta=cfg.loss.smooth_l1_beta,
             power_law_c=cfg.loss.power_law_c,
             n_fft=cfg.audio.n_fft,
             hop_length=cfg.audio.hop_length,

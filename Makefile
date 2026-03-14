@@ -113,6 +113,14 @@ tests: test-model test-data test-blocks ## Run all unit tests
 download-data: ## Download DNS5 minimal dataset
 	bash scripts/download_dns5_minimal.sh $(DATA_DIR)
 
+# ── Run arbitrary commands ──────────────────────────────────────────────────
+
+CMD ?= python -c 'import torch; print(torch.cuda.is_available())'
+
+.PHONY: run
+run: build ## Run arbitrary command: make run CMD="python script.py"
+	./scripts/docker-run.sh $(CMD)
+
 # ── Utilities ────────────────────────────────────────────────────────────────
 
 .PHONY: test-erle
@@ -134,7 +142,7 @@ tensorboard: ## Launch TensorBoard on port 6006
 
 .PHONY: shell
 shell: build ## Open interactive shell in the container
-	$(DOCKER_RUN) -it $(IMAGE) bash
+	./scripts/docker-run.sh --docker-args "-it" bash
 
 .PHONY: clean
 clean: ## Remove checkpoints, logs, and eval output

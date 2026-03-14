@@ -26,7 +26,7 @@ training:
   batch_size: 8
   grad_accum_steps: 1
   num_workers: 0            # tiny dataset, no need for workers
-  lr: 1.0e-3
+  lr: 3.0e-3
   weight_decay: 0.0         # no regularization for overfit test
   epochs: 500
   clip_length_sec: 3.0
@@ -39,19 +39,24 @@ training:
   early_stop_min_delta: 0.0
   delay_acc_min: 0.0        # disable gate
   erle_min_db: -100.0       # disable gate
-  lr_patience: 100          # effectively disabled
+  lr_scheduler: cosine_restarts
+  lr_patience: 10
   lr_factor: 0.5
   lr_min: 1.0e-6
+  lr_cosine_t0: 100
+  lr_cosine_tmult: 2
 
 loss:
-  plcmse_weight: 1.0
-  mag_l1_weight: 0.0
-  time_l1_weight: 0.0
+  plcmse_weight: 0.0
+  mag_l1_weight: 1.0
+  time_l1_weight: 1.0
   sisdr_weight: 0.0
-  delay_weight: 0.0
-  entropy_weight: 0.0
+  smooth_l1_weight: 0.0
+  smooth_l1_beta: 0.01
+  delay_weight: 0.01
+  entropy_weight: 0.001
   mask_reg_weight: 0.0
-  power_law_c: 0.5
+  power_law_c: 0.3
 
 data:
   num_train: 8              # tiny: fits in one batch
@@ -62,7 +67,7 @@ data:
   farend_dir: ""
   snr_range: [5, 40]
   ser_range: [-10, 10]
-  delay_range: [0, 320]
+  delay_range: [0, 5120]
   max_delay_frames: 32
   single_talk_prob: 0.2
 

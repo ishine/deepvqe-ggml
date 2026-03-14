@@ -20,6 +20,58 @@ delay heatmaps. GGUF export with BN folding verified (max error 3.9e-6).
 
 Uses Docker for training (`make build && make train-minimal`).
 
+## Running Python Code
+
+All Python code must run inside the Docker container (it has PyTorch, CUDA,
+and all dependencies). Never run Python directly on the host.
+
+```bash
+# Build the image first (most make targets do this automatically)
+make build
+
+# Run arbitrary commands via scripts/docker-run.sh:
+./scripts/docker-run.sh python -c 'import torch; print(torch.cuda.is_available())'
+./scripts/docker-run.sh python scripts/check_training.py
+
+# Pipe a script via stdin:
+echo "import torch; print(torch.cuda.get_device_name())" | ./scripts/docker-run.sh
+
+# Redirect a whole file as a Python script:
+./scripts/docker-run.sh < my_script.py
+
+# Multi-statement commands via bash -c:
+./scripts/docker-run.sh bash -c 'echo $HOSTNAME && python -c "import torch; print(torch.cuda.is_available())"'
+
+# Interactive shell:
+./scripts/docker-run.sh --docker-args "-it" bash
+
+# The `make run` target also uses docker-run.sh:
+make run CMD="python -c 'import torch; print(torch.cuda.is_available())'"
+
+# Existing convenience targets:
+make test              # Smoke test (dummy data, 2 epochs)
+make overfit           # Overfit test (8 tonal examples, FP32, 500 epochs)
+make train-minimal     # Train on DNS5 minimal subset
+make test-model        # Run model unit tests
+make test-blocks       # Run block-level verification tests
+make check             # Check training progress
+```
+
+`scripts/docker-run.sh` sets up all the standard Docker mounts (project,
+checkpoints, logs, datasets, eval output, torch inductor cache) and GPU
+access. It can be configured via environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEEPVQE_IMAGE` | `deepvqe` | Docker image name |
+| `DEEPVQE_GPU` | `all` | GPU device(s) |
+| `DEEPVQE_DATA_DIR` | `./datasets_fullband` | Host data directory |
+| `DEEPVQE_CKPT_DIR` | `./checkpoints` | Host checkpoint directory |
+| `DEEPVQE_LOG_DIR` | `./logs` | Host log directory |
+| `DEEPVQE_EVAL_DIR` | `./eval_output` | Host eval output directory |
+
+All file paths inside the container are relative to `/workspace/deepvqe`.
+
 ## Architecture
 
 | Component | Details |

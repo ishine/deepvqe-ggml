@@ -136,8 +136,15 @@ def get_warmup_scheduler(optimizer, cfg, steps_per_epoch):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def get_plateau_scheduler(optimizer, cfg):
-    """ReduceLROnPlateau (per-epoch) after warmup completes."""
+def get_epoch_scheduler(optimizer, cfg):
+    """Per-epoch scheduler: plateau or cosine with warm restarts."""
+    if cfg.training.lr_scheduler == "cosine_restarts":
+        return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=cfg.training.lr_cosine_t0,
+            T_mult=cfg.training.lr_cosine_tmult,
+            eta_min=cfg.training.lr_min,
+        )
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
@@ -300,14 +307,14 @@ def train(cfg, resume=None, dummy=False):
             target_len=int(cfg.training.clip_length_sec * cfg.audio.sample_rate),
             n_fft=cfg.audio.n_fft,
             hop_length=cfg.audio.hop_length,
-            delay_samples=160,
+            delay_range=tuple(int(x) for x in cfg.data.delay_range),
         )
         val_ds = DummyAECDataset(
             length=cfg.data.num_val,
             target_len=int(cfg.training.clip_length_sec * cfg.audio.sample_rate),
             n_fft=cfg.audio.n_fft,
             hop_length=cfg.audio.hop_length,
-            delay_samples=160,
+            delay_range=tuple(int(x) for x in cfg.data.delay_range),
         )
     else:
         train_ds = AECDataset(cfg, split="train")
@@ -347,7 +354,7 @@ def train(cfg, resume=None, dummy=False):
 
     steps_per_epoch = len(train_loader) // cfg.training.grad_accum_steps
     warmup_scheduler = get_warmup_scheduler(optimizer, cfg, steps_per_epoch)
-    plateau_scheduler = get_plateau_scheduler(optimizer, cfg)
+    epoch_scheduler = get_epoch_scheduler(optimizer, cfg)
 
     # AMP — BF16 on CUDA (no GradScaler needed), disabled on CPU
     use_amp = cfg.training.amp and device.type == "cuda"
@@ -357,7 +364,7 @@ def train(cfg, resume=None, dummy=False):
         enabled=use_amp,
     )
 
-    schedulers = {"warmup": warmup_scheduler, "plateau": plateau_scheduler}
+    schedulers = {"warmup": warmup_scheduler, "epoch": epoch_scheduler}
 
     # Resume
     start_epoch = 0
@@ -467,6 +474,7 @@ def train(cfg, resume=None, dummy=False):
                 for key, w in [("mag_l1", cfg.loss.mag_l1_weight),
                                ("time_l1", cfg.loss.time_l1_weight),
                                ("sisdr", cfg.loss.sisdr_weight),
+                               ("smooth_l1", cfg.loss.smooth_l1_weight),
                                ("delay", cfg.loss.delay_weight),
                                ("entropy", cfg.loss.entropy_weight),
                                ("mask_reg", cfg.loss.mask_reg_weight)]:
@@ -569,9 +577,12 @@ def train(cfg, resume=None, dummy=False):
         add_scalar_with_help(writer, "val/delay_acc", val_delay_acc, epoch)
         add_scalar_with_help(writer, "val/erle_db", val_erle, epoch)
 
-        # Step plateau scheduler on val loss (only after warmup)
+        # Step epoch scheduler (only after warmup)
         if warmup_done:
-            plateau_scheduler.step(val_losses["total"])
+            if cfg.training.lr_scheduler == "plateau":
+                epoch_scheduler.step(val_losses["total"])
+            else:
+                epoch_scheduler.step()
         if not warmup_done and (epoch + 1) >= cfg.training.warmup_epochs:
             warmup_done = True
 

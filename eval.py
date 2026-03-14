@@ -94,7 +94,7 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
             target_len=int(cfg.training.clip_length_sec * cfg.audio.sample_rate),
             n_fft=cfg.audio.n_fft,
             hop_length=cfg.audio.hop_length,
-            delay_samples=160,
+            delay_range=tuple(int(x) for x in cfg.data.delay_range),
         )
     else:
         val_ds = AECDataset(cfg, split="val")
