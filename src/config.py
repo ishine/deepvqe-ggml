@@ -60,6 +60,7 @@ class LossConfig:
     sisdr_weight: float = 0.5
     smooth_l1_weight: float = 0.0
     smooth_l1_beta: float = 1.0
+    energy_preservation_weight: float = 0.0
     delay_weight: float = 1.0
     entropy_weight: float = 0.01
     mask_reg_weight: float = 0.1

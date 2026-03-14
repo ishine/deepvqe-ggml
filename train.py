@@ -402,6 +402,8 @@ def train(cfg, resume=None, dummy=False):
             epoch_losses["time_l1"] = 0
         if cfg.loss.sisdr_weight > 0:
             epoch_losses["sisdr"] = 0
+        if cfg.loss.energy_preservation_weight > 0:
+            epoch_losses["energy_pres"] = 0
         if cfg.loss.delay_weight > 0:
             epoch_losses["delay"] = 0
         if cfg.loss.entropy_weight > 0:
@@ -514,6 +516,8 @@ def train(cfg, resume=None, dummy=False):
             val_losses["time_l1"] = 0
         if cfg.loss.sisdr_weight > 0:
             val_losses["sisdr"] = 0
+        if cfg.loss.energy_preservation_weight > 0:
+            val_losses["energy_pres"] = 0
         if cfg.loss.delay_weight > 0:
             val_losses["delay"] = 0
         if cfg.loss.entropy_weight > 0:

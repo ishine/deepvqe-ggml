@@ -92,6 +92,7 @@ class DeepVQELoss(nn.Module):
         sisdr_weight=0.5,
         smooth_l1_weight=0.0,
         smooth_l1_beta=1.0,
+        energy_preservation_weight=0.0,
         power_law_c=0.5,
         n_fft=512,
         hop_length=256,
@@ -103,6 +104,7 @@ class DeepVQELoss(nn.Module):
         self.sisdr_weight = sisdr_weight
         self.smooth_l1_weight = smooth_l1_weight
         self.smooth_l1_beta = smooth_l1_beta
+        self.energy_preservation_weight = energy_preservation_weight
         self.c = power_law_c
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -129,6 +131,7 @@ class DeepVQELoss(nn.Module):
             total_loss, dict of component losses
         """
         components = {}
+        zero = torch.tensor(0.0, device=pred_stft.device)
 
         # 1. Power-law compressed MSE
         pred_c = self._compress(pred_stft)
@@ -142,10 +145,16 @@ class DeepVQELoss(nn.Module):
         mag_l1 = torch.mean(torch.abs(pred_mag - target_mag))
         components["mag_l1"] = mag_l1
 
-        # 3. Time-domain losses (L1, SI-SDR, SmoothL1)
+        # 3. Energy preservation (asymmetric: penalize under-attenuation only)
+        if self.energy_preservation_weight > 0:
+            energy_pres = torch.mean(torch.relu(target_mag - pred_mag))
+        else:
+            energy_pres = zero
+        components["energy_pres"] = energy_pres
+
+        # 4. Time-domain losses (L1, SI-SDR, SmoothL1)
         _need_wav = (self.time_l1_weight > 0 or self.sisdr_weight > 0
                      or self.smooth_l1_weight > 0)
-        zero = torch.tensor(0.0, device=pred_stft.device)
         if target_wav is not None and _need_wav:
             pred_wav = istft(
                 pred_stft, self.n_fft, self.hop_length, length=target_wav.shape[-1]
@@ -166,6 +175,7 @@ class DeepVQELoss(nn.Module):
         total = (
             self.plcmse_weight * plcmse
             + self.mag_l1_weight * mag_l1
+            + self.energy_preservation_weight * energy_pres
             + self.time_l1_weight * time_l1
             + self.sisdr_weight * sisdr_loss
             + self.smooth_l1_weight * smooth_l1
@@ -182,6 +192,7 @@ class DeepVQELoss(nn.Module):
             sisdr_weight=cfg.loss.sisdr_weight,
             smooth_l1_weight=cfg.loss.smooth_l1_weight,
             smooth_l1_beta=cfg.loss.smooth_l1_beta,
+            energy_preservation_weight=cfg.loss.energy_preservation_weight,
             power_law_c=cfg.loss.power_law_c,
             n_fft=cfg.audio.n_fft,
             hop_length=cfg.audio.hop_length,
