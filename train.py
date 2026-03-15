@@ -196,45 +196,64 @@ def manage_checkpoints(ckpt_dir, keep_n):
         ckpts.pop(0).unlink()
 
 
-def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device):
-    """Log audio samples, spectrograms, and diagnostic figures to TensorBoard."""
+def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device):
+    """Log audio samples, spectrograms, and diagnostic figures to TensorBoard.
+
+    Args:
+        val_batches: list of (batch, sample_idx) tuples — diverse validation
+            examples chosen randomly each epoch.
+    """
     import matplotlib.pyplot as plt
 
     raw_model = _unwrap(model)
     model.eval()
 
+    # Use first sample for diagnostic figures (activations, CCM, delay)
+    diag_batch, diag_idx = val_batches[0]
+
     # Register hooks for activation capture
     activation_store, hook_handles = register_hooks(raw_model)
 
+    diag_delay_dist = None
+    diag_mic_stft = None
+
     with torch.no_grad():
-        mic_stft = val_batch["mic_stft"][:1].to(device)
-        ref_stft = val_batch["ref_stft"][:1].to(device)
-        clean_stft = val_batch["clean_stft"][:1].to(device)
+        # Log multiple audio samples for review
+        for i, (batch, sample_idx) in enumerate(val_batches):
+            mic_stft = batch["mic_stft"][sample_idx:sample_idx+1].to(device)
+            ref_stft = batch["ref_stft"][sample_idx:sample_idx+1].to(device)
+            clean_stft = batch["clean_stft"][sample_idx:sample_idx+1].to(device)
 
-        enhanced, delay_dist, mask_raw = model(mic_stft, ref_stft, return_delay=True)
-        length = val_batch["clean_wav"].shape[-1]
+            enhanced, delay_dist, mask_raw = model(mic_stft, ref_stft, return_delay=True)
+            length = batch["clean_wav"].shape[-1]
 
-        mic_wav = istft(mic_stft, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
-        enh_wav = istft(enhanced, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
-        clean_wav = val_batch["clean_wav"][:1].to(device)
+            mic_wav = istft(mic_stft, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
+            enh_wav = istft(enhanced, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
+            clean_wav = batch["clean_wav"][sample_idx:sample_idx+1].to(device)
 
-        sr = cfg.audio.sample_rate
-        writer.add_audio("audio/mic", mic_wav[0].cpu(), epoch, sample_rate=sr)
-        writer.add_audio("audio/enhanced", enh_wav[0].cpu(), epoch, sample_rate=sr)
-        writer.add_audio("audio/clean", clean_wav[0].cpu(), epoch, sample_rate=sr)
+            sr = cfg.audio.sample_rate
+            tag = f"audio_{i}" if i > 0 else "audio"
+            writer.add_audio(f"{tag}/mic", mic_wav[0].cpu(), epoch, sample_rate=sr)
+            writer.add_audio(f"{tag}/enhanced", enh_wav[0].cpu(), epoch, sample_rate=sr)
+            writer.add_audio(f"{tag}/clean", clean_wav[0].cpu(), epoch, sample_rate=sr)
 
-        # Spectrogram comparison
-        fig = plot_spectrogram_comparison(
-            mic_stft, enhanced, clean_stft, sr, cfg.audio.hop_length,
-        )
-        writer.add_figure("spectrograms/comparison", fig, epoch)
-        plt.close(fig)
+            # Spectrogram comparison for each sample
+            fig = plot_spectrogram_comparison(
+                mic_stft, enhanced, clean_stft, sr, cfg.audio.hop_length,
+            )
+            writer.add_figure(f"spectrograms/comparison_{i}", fig, epoch)
+            plt.close(fig)
 
-        # Delay distribution with ground truth
-        if delay_dist is not None:
-            gt_delay = val_batch["delay_samples"][0]
+            # Capture activations/diagnostics from first sample
+            if i == 0:
+                diag_delay_dist = delay_dist
+                diag_mic_stft = mic_stft
+
+        # Delay distribution with ground truth (first sample)
+        if diag_delay_dist is not None:
+            gt_delay = diag_batch["delay_samples"][diag_idx]
             fig = plot_delay_with_gt(
-                delay_dist, gt_delay, cfg.audio.hop_length, cfg.model.dmax,
+                diag_delay_dist, gt_delay, cfg.audio.hop_length, cfg.model.dmax,
             )
             writer.add_figure("delay/distribution_with_gt", fig, epoch)
             plt.close(fig)
@@ -242,7 +261,7 @@ def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device):
         # CCM mask analysis (from mask_head output = 27ch mask)
         mask_key = "mask_head" if "mask_head" in activation_store else "dec1"
         if mask_key in activation_store:
-            fig = plot_ccm_mask(activation_store[mask_key], mic_stft)
+            fig = plot_ccm_mask(activation_store[mask_key], diag_mic_stft)
             writer.add_figure("ccm/mask_magnitude", fig, epoch)
             plt.close(fig)
 
@@ -529,10 +548,13 @@ def train(cfg, resume=None, dummy=False):
         val_delay_acc = 0
         val_erle = 0
         n_val = 0
-        val_sample_batch = None
+        # Collect diverse samples for TensorBoard: pick random batches/indices
+        n_tb_samples = min(cfg.eval.audio_samples, len(val_loader))
+        tb_batch_indices = set(random.sample(range(len(val_loader)), n_tb_samples))
+        val_sample_batches = []
 
         with torch.no_grad(), autocast_ctx():
-            for batch in val_loader:
+            for batch_idx, batch in enumerate(val_loader):
                 mic_stft = batch["mic_stft"].to(device, non_blocking=True)
                 ref_stft = batch["ref_stft"].to(device, non_blocking=True)
                 clean_stft = batch["clean_stft"].to(device, non_blocking=True)
@@ -572,8 +594,11 @@ def train(cfg, resume=None, dummy=False):
                 val_erle += erle.item()
                 n_val += 1
 
-                if val_sample_batch is None:
-                    val_sample_batch = batch
+                if batch_idx in tb_batch_indices:
+                    # Pick a random example within this batch
+                    bs = batch["mic_stft"].shape[0]
+                    sample_idx = random.randint(0, bs - 1)
+                    val_sample_batches.append((batch, sample_idx))
 
         for k in val_losses:
             val_losses[k] /= max(n_val, 1)
@@ -600,8 +625,8 @@ def train(cfg, resume=None, dummy=False):
         )
 
         # Log audio/spectrograms
-        if val_sample_batch:
-            log_audio_and_spectrograms(writer, model, val_sample_batch, epoch, cfg, device)
+        if val_sample_batches:
+            log_audio_and_spectrograms(writer, model, val_sample_batches, epoch, cfg, device)
 
         # Checkpointing
         if (epoch + 1) % cfg.training.checkpoint_every == 0:
