@@ -96,6 +96,14 @@ class PathsConfig:
 
 
 @dataclass
+class HubConfig:
+    push_to_hub: bool = False
+    hub_model_id: str = ""           # e.g. "richdrummer33/deepvqe-aec"
+    push_logs_every: int = 5         # upload TB logs every N epochs
+    push_checkpoints: bool = True
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -104,6 +112,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
+    hub: HubConfig = field(default_factory=HubConfig)
 
 
 def _apply_dict(dc, d):

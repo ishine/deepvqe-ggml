@@ -76,3 +76,9 @@ data:
 paths:
   checkpoint_dir: checkpoints/overfit
   log_dir: logs/overfit
+
+hub:
+  push_to_hub: false
+  hub_model_id: ""
+  push_logs_every: 5
+  push_checkpoints: true

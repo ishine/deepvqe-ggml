@@ -57,13 +57,14 @@ def _collect_audio_files(directory):
         files.extend(str(f) for f in d.rglob(ext))
     files.sort()
 
-    # Write cache
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps({
-        "path": abs_path,
-        "count": len(files),
-        "files": files,
-    }))
+    # Write cache (rank-0 only to avoid race in multi-GPU)
+    if int(os.environ.get("RANK", "0")) == 0:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps({
+            "path": abs_path,
+            "count": len(files),
+            "files": files,
+        }))
 
     return files
 

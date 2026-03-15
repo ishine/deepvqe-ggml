@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install only packages not already in the NGC container
 # (numpy, scipy, tensorboard, pyyaml, matplotlib, tqdm are pre-installed)
-RUN pip install --no-cache-dir einops pesq pystoi soundfile gguf
+RUN pip install --no-cache-dir einops pesq pystoi soundfile gguf accelerate huggingface_hub
 
 WORKDIR /workspace/deepvqe
 

@@ -1,3 +1,12 @@
+# Cloud training config: 8xH200 via HuggingFace Jobs
+#
+# Effective batch = 50 × 8 GPUs = 400 (matches paper)
+# Data: DNS5 minimal subset downloaded at job start
+#
+# Usage:
+#   accelerate launch --num_processes 8 --mixed_precision bf16 \
+#       train.py --config configs/cloud.yaml
+
 model:
   mic_channels: [2, 64, 128, 128, 128, 128]
   far_channels: [2, 32, 128]
@@ -12,12 +21,12 @@ audio:
   sample_rate: 16000
   n_fft: 512
   hop_length: 256
-  n_freqs: 257  # n_fft // 2 + 1
+  n_freqs: 257
 
 training:
-  batch_size: 32
-  grad_accum_steps: 2
-  num_workers: 12
+  batch_size: 50             # per GPU → 50 × 8 = 400 effective
+  grad_accum_steps: 1
+  num_workers: 8
   lr: 1.2e-3
   weight_decay: 5.0e-7
   epochs: 250
@@ -32,16 +41,13 @@ training:
   delay_acc_min: 0.5
   erle_min_db: 3.0
   lr_scheduler: cosine_restarts
-  lr_patience: 5               # fallback if switched to plateau
+  lr_patience: 5
   lr_factor: 0.5
   lr_min: 1.0e-6
   lr_cosine_t0: 50
   lr_cosine_tmult: 2
 
 loss:
-  # Mag-L1 + Time-L1 + energy preservation (relative) + delay supervision.
-  # Verified on overfit test: 11 dB ERLE with mask head architecture.
-  # Energy preservation (relative mode) prevents uniform suppression.
   plcmse_weight: 0.0
   mag_l1_weight: 1.0
   time_l1_weight: 1.0
@@ -59,11 +65,11 @@ data:
   clean_dir: "/data/dns5/clean"
   noise_dir: "/data/dns5/noise"
   rir_dir: "/data/dns5/impulse_responses"
-  farend_dir: ""      # empty = reuse clean_dir
+  farend_dir: ""
   snr_range: [5, 40]
   ser_range: [-10, 10]
-  delay_range: [0, 320]  # ms
-  max_delay_frames: 32   # matches dmax
+  delay_range: [0, 320]
+  max_delay_frames: 32
   single_talk_prob: 0.2
   num_val: 1000
 
@@ -76,7 +82,7 @@ paths:
   log_dir: logs
 
 hub:
-  push_to_hub: false
-  hub_model_id: ""
+  push_to_hub: true
+  hub_model_id: "richdrummer33/deepvqe-aec"
   push_logs_every: 5
   push_checkpoints: true
