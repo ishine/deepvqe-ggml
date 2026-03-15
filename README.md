@@ -83,9 +83,10 @@ All file paths inside the container are relative to `/workspace/deepvqe`.
 | AlignBlock | Cross-attention soft delay, dmax=32 (320ms), h=32 similarity channels |
 | Encoder block 3 | 256→128 (concatenated mic + aligned far-end) |
 | Bottleneck | GRU(1152→576) + Linear(576→1152) |
-| Decoder | 5 blocks with sub-pixel conv: 128→128→128→64→27 |
+| Decoder | 5 blocks with sub-pixel conv + BN: 128→128→128→64→64 |
+| Mask head | 1x1 Conv2d(64→27), no BN — preserves spatial contrast for mask estimation |
 | CCM | 27ch → 3×3 complex convolving mask (real-valued arithmetic) |
-| Parameters | ~7.5M (full model) |
+| Parameters | ~8.0M (full model) |
 
 ## Hardware
 
@@ -284,6 +285,65 @@ Hard training gates (after epoch 20): delay accuracy ≥ 70%, ERLE ≥ 3 dB.
 `notebooks/explore_training.ipynb` walks through the full pipeline interactively
 (STFT, encoder, AlignBlock, bottleneck, decoder, CCM, loss). Works with
 `DummyAECDataset` (no data needed) or a trained checkpoint.
+
+## Training Findings
+
+### Decoder BatchNorm Collapse
+
+The original DeepVQE architecture (and both reference implementations) applies double
+BN+ELU in each non-last decoder block: once inside the ResidualBlock, once after the
+SubpixelConv2d upsampling. With 4 non-last blocks, this creates 9 sequential BN layers
+across the decoder chain.
+
+**Diagnosis**: Decoder activation std collapses from 0.83 (dec5) to 0.21 (dec1),
+producing near-uniform CCM masks that lack the frequency-selective spatial contrast
+needed for echo cancellation. The model either uniformly suppresses everything
+(|H|=0.19, ERLE=8.3 dB) or uniformly passes through (|H|=0.90, ERLE=7.3 dB),
+depending on loss configuration. Neither is correct — the mask needs |H|~1 at clean
+bins and |H|~0 at echo bins.
+
+**Root cause**: BN normalizes per-channel across all T-F positions, systematically
+destroying frequency-dependent spatial variation. The SubpixelConv2d creates spatial
+contrast via pixel shuffle, then the outer BN immediately re-normalizes it away. This
+is a known anti-pattern — ESRGAN (Wang et al., 2018) explicitly removed all BN from
+their pixel-shuffle decoder for the same reason.
+
+**Approaches tried**:
+- Removing BN entirely: activation explosion (std 87 at dec3, ELU saturation)
+- Weight normalization on SubpixelConv2d: still explodes, just slower
+- GroupNorm: breaks causality (computes stats across future frames)
+
+**Fix**: Added a separate BN-free mask estimation head (`mask_head = Conv2d(64, 27, 1)`)
+after the decoder. The decoder keeps BN for stability (all 5 blocks are uniform with
+BN+ELU), and the mask head is a simple 1x1 conv with no normalization. This decouples
+feature extraction (stable, BN-normalized) from mask estimation (BN-free, preserving
+spatial contrast). Identity init: mask_head.bias[7] = 1.0, small random weights.
+Pattern from DCCRN and Conv-TasNet which use separate bounded mask heads.
+
+### CCM 27-Channel Gradient Imbalance
+
+The CCM's 27 channels encode 3 basis groups × 9 kernel taps. For echo cancellation
+(where the ideal mask is a per-bin complex gain), only 1 out of 27 channels
+(basis group 0, center tap) should be nonzero (~1.0). The other 26 channels are
+pushed toward zero by the loss gradient. This 26:1 imbalance biases the decoder's
+shared weights toward producing small values overall.
+
+### Energy Preservation Loss
+
+Added asymmetric energy preservation loss with two modes:
+- **absolute**: `mean(relu(|target| - |pred|))` — penalizes absolute magnitude deficit
+- **relative**: `mean(relu((|target| - |pred|) / (|target| + eps)))` — penalizes fractional
+  attenuation, so uniform 10% cut gives penalty 0.1 regardless of bin energy
+
+The relative mode prevents the model from hiding in "uniform mild attenuation" where
+the absolute penalty stays small because loud bins dominate the mean.
+
+### Diagnostic Tools
+
+- `make diagnose` — Per-block weight norms, activation stats, skip vs main path
+  magnitudes, BN running stats, SubpixelConv2d even/odd analysis, CCM mask decomposition
+- `make report` — TensorBoard log analysis with subcommands: summary, scalars, loss
+  dynamics (plateau detection, LR restart detection), gradient analysis, CSV/JSON export
 
 ## References
 

@@ -93,6 +93,7 @@ class DeepVQELoss(nn.Module):
         smooth_l1_weight=0.0,
         smooth_l1_beta=1.0,
         energy_preservation_weight=0.0,
+        energy_pres_mode="relative",
         power_law_c=0.5,
         n_fft=512,
         hop_length=256,
@@ -105,6 +106,7 @@ class DeepVQELoss(nn.Module):
         self.smooth_l1_weight = smooth_l1_weight
         self.smooth_l1_beta = smooth_l1_beta
         self.energy_preservation_weight = energy_preservation_weight
+        self.energy_pres_mode = energy_pres_mode
         self.c = power_law_c
         self.n_fft = n_fft
         self.hop_length = hop_length
@@ -147,7 +149,13 @@ class DeepVQELoss(nn.Module):
 
         # 3. Energy preservation (asymmetric: penalize under-attenuation only)
         if self.energy_preservation_weight > 0:
-            energy_pres = torch.mean(torch.relu(target_mag - pred_mag))
+            if self.energy_pres_mode == "relative":
+                # Fractional attenuation: 10% cut → penalty 0.1 at every bin
+                energy_pres = torch.mean(
+                    torch.relu((target_mag - pred_mag) / (target_mag + 1e-8))
+                )
+            else:  # "absolute"
+                energy_pres = torch.mean(torch.relu(target_mag - pred_mag))
         else:
             energy_pres = zero
         components["energy_pres"] = energy_pres
@@ -193,6 +201,7 @@ class DeepVQELoss(nn.Module):
             smooth_l1_weight=cfg.loss.smooth_l1_weight,
             smooth_l1_beta=cfg.loss.smooth_l1_beta,
             energy_preservation_weight=cfg.loss.energy_preservation_weight,
+            energy_pres_mode=cfg.loss.energy_pres_mode,
             power_law_c=cfg.loss.power_law_c,
             n_fft=cfg.audio.n_fft,
             hop_length=cfg.audio.hop_length,

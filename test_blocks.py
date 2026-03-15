@@ -521,14 +521,13 @@ def test_decoder_skip_connection():
 
 def test_decoder_frequency_chain():
     """5-block chain with trimming: 9→17→33→65→129→257"""
-    channels = [128, 128, 128, 128, 64, 27]
+    channels = [128, 128, 128, 128, 64, 64]
     expected_freqs = [9, 18, 34, 66, 130, 258]  # raw sub-pixel output (before trim)
     trim_freqs = [9, 17, 33, 65, 129, 257]  # after trim to match encoder
 
     x = torch.randn(1, channels[0], 8, expected_freqs[0])
     for i in range(5):
-        is_last = (i == 4)
-        dec = DecoderBlock(channels[i], channels[i + 1], is_last=is_last).eval()
+        dec = DecoderBlock(channels[i], channels[i + 1]).eval()
         x_en = torch.randn(1, channels[i], 8, expected_freqs[0 + i])  # dummy skip
         x_en = torch.randn(1, channels[i], 8, trim_freqs[i])
         y = dec(x, x_en)
@@ -712,10 +711,11 @@ def test_model_forced_identity_reconstruction():
     model = DeepVQEAEC().eval()
     B, F, T = 1, 257, 32
 
-    # Zero the dec1 subpixel conv weights so output is purely from bias
+    # Zero weights so output is purely from bias (identity mask)
     with torch.no_grad():
         model.dec1.deconv.conv.weight.zero_()
-        # Bias already set by _init_ccm_identity: bias[4]=1, bias[31]=1
+        model.mask_head.weight.zero_()
+        # Bias already set by _init_ccm_identity on mask_head
 
     mic = torch.randn(B, F, T, 2) * 0.5
     ref = torch.randn(B, F, T, 2) * 0.5

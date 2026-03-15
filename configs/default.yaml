@@ -27,29 +27,33 @@ training:
   warmup_epochs: 3
   checkpoint_every: 5
   keep_checkpoints: 5
-  early_stop_patience: 30      # stop after N epochs with no val loss improvement
-  early_stop_min_delta: 1.0e-4  # minimum decrease to count as improvement
-  delay_acc_min: 0.5            # delay supervision enabled, expect faster convergence
-  erle_min_db: 3.0              # with delay + smooth_l1, ERLE should ramp faster
-  lr_patience: 3               # epochs to wait before reducing LR
-  lr_factor: 0.5               # multiply LR by this on plateau
-  lr_min: 1.0e-6               # minimum learning rate
+  early_stop_patience: 30
+  early_stop_min_delta: 1.0e-4
+  delay_acc_min: 0.5
+  erle_min_db: 3.0
+  lr_scheduler: cosine_restarts
+  lr_patience: 5               # fallback if switched to plateau
+  lr_factor: 0.5
+  lr_min: 1.0e-6
+  lr_cosine_t0: 50
+  lr_cosine_tmult: 2
 
 loss:
-  # PLC-MSE + SmoothL1 + delay supervision. Verified on overfit test.
-  # PLC-MSE: power-law compressed MSE on complex STFT (magnitude + phase).
-  # SmoothL1: time-domain waveform loss with tight beta for near-L1 behavior.
-  # Delay CE + entropy: supervise AlignBlock attention with ground truth delay.
-  plcmse_weight: 1.0
-  mag_l1_weight: 0.0
-  time_l1_weight: 0.0
+  # Mag-L1 + Time-L1 + energy preservation (relative) + delay supervision.
+  # Verified on overfit test: 11 dB ERLE with mask head architecture.
+  # Energy preservation (relative mode) prevents uniform suppression.
+  plcmse_weight: 0.0
+  mag_l1_weight: 1.0
+  time_l1_weight: 1.0
   sisdr_weight: 0.0
-  smooth_l1_weight: 1.0
+  smooth_l1_weight: 0.0
   smooth_l1_beta: 0.01
+  energy_preservation_weight: 5.0
+  energy_pres_mode: relative
   delay_weight: 0.1
   entropy_weight: 0.01
   mask_reg_weight: 0.0
-  power_law_c: 0.5
+  power_law_c: 0.3
 
 data:
   clean_dir: "/data/dns5/clean"

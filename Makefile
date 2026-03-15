@@ -137,6 +137,16 @@ check: build ## Check training progress (loss, entropy, grad norms)
 	$(DOCKER_RUN) $(IMAGE) \
 		python scripts/check_training.py $(EXTRA_ARGS)
 
+.PHONY: report
+report: build ## Training report (summary, scalars, loss, gradients, export)
+	$(DOCKER_RUN) $(IMAGE) \
+		python scripts/report_training.py $(EXTRA_ARGS)
+
+.PHONY: diagnose
+diagnose: build ## Diagnose decoder activations from overfit checkpoint
+	$(DOCKER_RUN) $(IMAGE) \
+		python scripts/diagnose_decoder.py $(EXTRA_ARGS)
+
 .PHONY: tensorboard
 tensorboard: ## Launch TensorBoard on port 6006
 	docker run --rm -p 6006:6006 \

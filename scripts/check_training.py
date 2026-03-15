@@ -2,50 +2,11 @@
 """Check training progress from TensorBoard logs."""
 
 import argparse
-import glob
-import os
 import sys
+import os
 
-from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-
-
-def load_logs(log_dir="logs"):
-    """Load TensorBoard events from log directory."""
-    # Check for subdirectories first, then flat event files
-    dirs = sorted(glob.glob(os.path.join(log_dir, "*/")))
-    event_files = sorted(glob.glob(os.path.join(log_dir, "events.out.tfevents.*")))
-
-    if dirs:
-        path = dirs[-1]
-    elif event_files:
-        path = log_dir
-    else:
-        print(f"No TensorBoard logs found in {log_dir}/")
-        sys.exit(1)
-
-    ea = EventAccumulator(path, size_guidance={"scalars": 0})  # load all
-    ea.Reload()
-    return path, ea
-
-
-def get_latest(ea, tag):
-    """Get latest value for a tag, or None."""
-    scalars = ea.Tags().get("scalars", [])
-    if tag not in scalars:
-        return None
-    events = ea.Scalars(tag)
-    return events[-1] if events else None
-
-
-def get_history(ea, tag, n=None):
-    """Get scalar history, optionally last n entries."""
-    scalars = ea.Tags().get("scalars", [])
-    if tag not in scalars:
-        return []
-    events = ea.Scalars(tag)
-    if n is not None:
-        return events[-n:]
-    return events
+sys.path.insert(0, os.path.dirname(__file__))
+from tb_utils import load_logs, get_latest, get_history
 
 
 def main():

@@ -110,13 +110,12 @@ def fold_model_batchnorms(model: DeepVQEAEC) -> dict:
         # Decoder BN follows SubpixelConv2d (which reshapes channels),
         # so we can't fold it into the preceding conv. Instead, collapse
         # the BN into a channel-wise scale+bias (affine transform).
-        if not dec.is_last and hasattr(dec, "bn"):
+        if hasattr(dec, "bn"):
             bn = dec.bn
             bn.eval()
             sigma = torch.sqrt(bn.running_var + bn.eps)
             scale = bn.weight.data / sigma
             bias = bn.bias.data - bn.weight.data * bn.running_mean / sigma
-            # Replace BN with a simple affine: x * scale + bias
             affine = _ChannelAffine(scale, bias)
             dec.bn = affine
 

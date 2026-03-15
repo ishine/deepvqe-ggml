@@ -291,7 +291,7 @@ def register_hooks(model):
         "far_enc1", "far_enc2",
         "align", "bottleneck",
         "dec5", "dec4", "dec3", "dec2", "dec1",
-        "ccm",
+        "mask_head", "ccm",
     ]
 
     for name in target_names:

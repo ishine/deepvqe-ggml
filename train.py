@@ -239,9 +239,10 @@ def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device):
             writer.add_figure("delay/distribution_with_gt", fig, epoch)
             plt.close(fig)
 
-        # CCM mask analysis (from hooked dec1 output = 27ch mask)
-        if "dec1" in activation_store:
-            fig = plot_ccm_mask(activation_store["dec1"], mic_stft)
+        # CCM mask analysis (from mask_head output = 27ch mask)
+        mask_key = "mask_head" if "mask_head" in activation_store else "dec1"
+        if mask_key in activation_store:
+            fig = plot_ccm_mask(activation_store[mask_key], mic_stft)
             writer.add_figure("ccm/mask_magnitude", fig, epoch)
             plt.close(fig)
 
@@ -477,6 +478,7 @@ def train(cfg, resume=None, dummy=False):
                                ("time_l1", cfg.loss.time_l1_weight),
                                ("sisdr", cfg.loss.sisdr_weight),
                                ("smooth_l1", cfg.loss.smooth_l1_weight),
+                               ("energy_pres", cfg.loss.energy_preservation_weight),
                                ("delay", cfg.loss.delay_weight),
                                ("entropy", cfg.loss.entropy_weight),
                                ("mask_reg", cfg.loss.mask_reg_weight)]:

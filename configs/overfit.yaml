@@ -26,9 +26,9 @@ training:
   batch_size: 8
   grad_accum_steps: 1
   num_workers: 0            # tiny dataset, no need for workers
-  lr: 3.0e-3
+  lr: 1.0e-3
   weight_decay: 0.0         # no regularization for overfit test
-  epochs: 500
+  epochs: 1000
   clip_length_sec: 3.0
   amp: false               # FP32 for overfit test — rules out BF16 precision floor
   grad_clip: 5.0
@@ -54,6 +54,7 @@ loss:
   smooth_l1_weight: 0.0
   smooth_l1_beta: 0.01
   energy_preservation_weight: 5.0
+  energy_pres_mode: relative
   delay_weight: 0.01
   entropy_weight: 0.001
   mask_reg_weight: 0.0

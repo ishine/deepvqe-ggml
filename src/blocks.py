@@ -77,19 +77,15 @@ class SubpixelConv2d(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=(4, 3), is_last=False):
+    def __init__(self, in_channels, out_channels, kernel_size=(4, 3)):
         super().__init__()
         self.skip_conv = nn.Conv2d(in_channels, in_channels, 1)
         self.resblock = ResidualBlock(in_channels)
         self.deconv = SubpixelConv2d(in_channels, out_channels, kernel_size)
-        self.is_last = is_last
-        if not is_last:
-            self.bn = nn.BatchNorm2d(out_channels)
-            self.elu = nn.ELU()
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.elu = nn.ELU()
 
     def forward(self, x, x_en):
         y = x + self.skip_conv(x_en)
-        y = self.deconv(self.resblock(y))
-        if not self.is_last:
-            y = self.elu(self.bn(y))
+        y = self.elu(self.bn(self.deconv(self.resblock(y))))
         return y
