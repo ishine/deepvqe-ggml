@@ -50,8 +50,8 @@ loss:
   smooth_l1_beta: 0.01
   energy_preservation_weight: 5.0
   energy_pres_mode: relative
-  delay_weight: 0.1
-  entropy_weight: 0.01
+  delay_weight: 0.0
+  entropy_weight: 0.0
   mask_reg_weight: 0.0
   power_law_c: 0.3
 
