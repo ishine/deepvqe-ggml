@@ -245,8 +245,8 @@ def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device,
             writer.add_figure("delay/distribution_with_gt", fig, epoch)
             plt.close(fig)
 
-        # CCM mask analysis (from mask_head output = 27ch mask)
-        mask_key = "mask_head" if "mask_head" in activation_store else "dec1"
+        # CCM mask analysis (dec1 output = 27ch mask, no BN)
+        mask_key = "dec1"
         if mask_key in activation_store:
             fig = plot_ccm_mask(activation_store[mask_key], mic_stft)
             writer.add_figure("ccm/mask_magnitude", fig, epoch)

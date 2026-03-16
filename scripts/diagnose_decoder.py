@@ -205,14 +205,14 @@ def main():
         if hasattr(dec, "bn"):
             bn_stats(f"{dec_name}.bn", dec.bn)
 
-    # Mask head stats (if present)
-    if hasattr(model, "mask_head"):
-        mh = model.mask_head
-        print()
-        print(f"  Mask head (Conv2d {mh.in_channels}→{mh.out_channels}, 1x1, no BN):")
-        print(f"    weight: norm={mh.weight.data.norm().item():.4f}, "
-              f"mean={mh.weight.data.mean().item():.6f}, std={mh.weight.data.std().item():.6f}")
-        print(f"    bias[7] (identity): {mh.bias.data[7].item():.6f}")
+    # dec1 identity init stats (is_last=True, no BN)
+    conv = model.dec1.deconv.conv
+    print()
+    print(f"  dec1.deconv.conv (Conv2d {conv.in_channels}→{conv.out_channels}, is_last=True, no BN):")
+    print(f"    weight: norm={conv.weight.data.norm().item():.4f}, "
+          f"mean={conv.weight.data.mean().item():.6f}, std={conv.weight.data.std().item():.6f}")
+    print(f"    bias[7] (identity, even freq): {conv.bias.data[7].item():.6f}")
+    print(f"    bias[34] (identity, odd freq): {conv.bias.data[34].item():.6f}")
 
     # ── Section E: SubpixelConv2d even/odd analysis (dec1) ──
     section("E. SubpixelConv2d Analysis (dec1)")

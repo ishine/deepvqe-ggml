@@ -20,8 +20,8 @@ class DeepVQEAEC(nn.Module):
         AlignBlock after enc2: cross-attention soft delay
         Enc3 input: 256 channels (concat mic_enc2 + aligned_far)
         Bottleneck: GRU(1152→576) + Linear(576→1152)
-        Decoder: 5 blocks with sub-pixel conv (128→128→128→64→64)
-        Mask head: 1x1 Conv2d(64→27), no BN (preserves spatial contrast)
+        Decoder: 5 blocks with sub-pixel conv (128→128→128→64→27)
+        Last decoder block (dec1): no BN/ELU, outputs 27ch directly to CCM
         CCM: 27ch → 3×3 complex convolving mask
     """
 
@@ -71,14 +71,7 @@ class DeepVQEAEC(nn.Module):
         self.dec4 = DecoderBlock(mic_channels[4], mic_channels[3])  # 128→128
         self.dec3 = DecoderBlock(mic_channels[3], mic_channels[2])  # 128→128
         self.dec2 = DecoderBlock(mic_channels[2], mic_channels[1])  # 128→64
-        self.dec1 = DecoderBlock(mic_channels[1], mic_channels[1])  # 64→64
-
-        # Mask estimation head: BN-free 1x1 conv to preserve spatial contrast.
-        # Decoder BN normalizes per-channel across T-F positions, smoothing out
-        # frequency-dependent variation. The mask head bypasses this — it maps
-        # 64 BN-normalized feature channels to 27 CCM mask channels without
-        # normalization, allowing it to produce spatially varying masks.
-        self.mask_head = nn.Conv2d(mic_channels[1], 27, 1)
+        self.dec1 = DecoderBlock(mic_channels[1], 27, is_last=True)  # 64→27, no BN/ELU
 
         # Complex Convolving Mask
         self.ccm = CCM()
@@ -86,7 +79,7 @@ class DeepVQEAEC(nn.Module):
         self._init_ccm_identity()
 
     def _init_ccm_identity(self):
-        """Initialize mask_head bias so the CCM mask starts as identity (passthrough).
+        """Initialize dec1 deconv bias so the CCM mask starts as identity (passthrough).
 
         The 27-ch mask is reshaped as (3 basis, 9 kernel).  Basis vectors
         v_real=[1,-0.5,-0.5] and v_imag=[0,√3/2,-√3/2] sum to zero, so
@@ -99,13 +92,15 @@ class DeepVQEAEC(nn.Module):
           n=0: f-1, n=1: f (current freq), n=2: f+1
         So current (t, f) = kernel index 2*3+1 = 7, NOT 4.
 
-        mask_head is a 1x1 Conv2d(64, 27) — bias alone sets the identity.
+        SubpixelConv2d stores 54 channels (27×2 for sub-pixel shuffle).
+        Output channel c comes from conv channels c (even freq) and c+27
+        (odd freq), so we set bias[7] = bias[34] = 1.
         """
+        conv = self.dec1.deconv.conv
         with torch.no_grad():
-            # Small random weights (default init) allow gradient flow.
-            # Bias sets the identity mask; weights add feature-dependent corrections.
-            self.mask_head.bias.zero_()
-            self.mask_head.bias[7] = 1.0   # r=0, current (t,f)
+            conv.bias.zero_()
+            conv.bias[7] = 1.0   # r=0, current (t,f), even freq bins
+            conv.bias[34] = 1.0  # r=0, current (t,f), odd freq bins
 
     def forward(self, mic_stft, ref_stft, return_delay=False):
         """
@@ -151,10 +146,7 @@ class DeepVQEAEC(nn.Module):
         d4 = self.dec4(d5, mic_e4)[..., : mic_e3.shape[-1]]
         d3 = self.dec3(d4, mic_e3)[..., : mic_e2.shape[-1]]
         d2 = self.dec2(d3, mic_e2)[..., : mic_e1.shape[-1]]
-        d1_feat = self.dec1(d2, mic_e1)[..., : mic_fe.shape[-1]]
-
-        # Mask head: BN-free projection to 27 CCM channels
-        d1 = self.mask_head(d1_feat)
+        d1 = self.dec1(d2, mic_e1)[..., : mic_fe.shape[-1]]
 
         # Apply complex convolving mask
         enhanced = self.ccm(d1, mic_stft)  # (B, 257, T, 2)
