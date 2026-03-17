@@ -69,9 +69,9 @@ train-full: build ## Train on full dataset (set DATA_DIR= to override)
 		python train.py --config $(CONFIG) $(EXTRA_ARGS)
 
 .PHONY: overfit
-overfit: build ## Overfit test: 8 tonal examples, loss should → 0
+overfit: build ## Overfit test: 8 real audio examples with varied delays
 	$(DOCKER_RUN) $(IMAGE) \
-		python train.py --config configs/overfit.yaml --dummy $(EXTRA_ARGS)
+		python train.py --config configs/overfit.yaml --overfit-real $(EXTRA_ARGS)
 
 # ── Evaluation & Export ──────────────────────────────────────────────────────
 

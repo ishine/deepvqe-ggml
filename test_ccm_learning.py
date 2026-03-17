@@ -195,16 +195,16 @@ def test_dec1_mask_learnability():
     x_main = torch.randn(B, 64, T, 129)  # from dec2
     x_skip = torch.randn(B, 64, T, 129)  # from enc1
 
-    dec1 = DecoderBlock(64, 64)
-    mask_head = nn.Conv2d(64, 27, 1)
+    dec1 = DecoderBlock(64, 27, is_last=True)
     ccm = CCM().eval()
 
-    # Identity init on mask_head
+    # Identity init on dec1 deconv bias
     with torch.no_grad():
-        mask_head.bias.zero_()
-        mask_head.bias[7] = 1.0
+        dec1.deconv.conv.bias.zero_()
+        dec1.deconv.conv.bias[7] = 1.0
+        dec1.deconv.conv.bias[34] = 1.0
 
-    params = list(dec1.parameters()) + list(mask_head.parameters())
+    params = list(dec1.parameters())
     optimizer = torch.optim.Adam(params, lr=1e-3)
 
     t_sl = slice(2, T)
@@ -213,7 +213,7 @@ def test_dec1_mask_learnability():
     initial_loss = None
     for step in range(300):
         optimizer.zero_grad()
-        d1 = mask_head(dec1(x_main, x_skip)[..., :F])
+        d1 = dec1(x_main, x_skip)[..., :F]
         output = ccm(d1, mic_stft)
         loss = (output[:, f_sl, t_sl, :] - clean_stft[:, f_sl, t_sl, :]).pow(2).mean()
         if step == 0:
@@ -226,7 +226,7 @@ def test_dec1_mask_learnability():
 
     # Mask stats
     with torch.no_grad():
-        d1 = mask_head(dec1(x_main, x_skip)[..., :F])
+        d1 = dec1(x_main, x_skip)[..., :F]
     mag = mask_mag_from_raw(d1)
     center_mag = mag[:, 7].mean().item()
     stats = basis_group_stats(d1)
@@ -264,19 +264,18 @@ def test_decoder_chain_learnability():
     dec4 = DecoderBlock(128, 128)
     dec3 = DecoderBlock(128, 128)
     dec2 = DecoderBlock(128, 64)
-    dec1 = DecoderBlock(64, 64)
-    mask_head = nn.Conv2d(64, 27, 1)
+    dec1 = DecoderBlock(64, 27, is_last=True)
     ccm = CCM().eval()
 
-    # Identity init on mask_head
+    # Identity init on dec1 deconv bias
     with torch.no_grad():
-        mask_head.bias.zero_()
-        mask_head.bias[7] = 1.0
+        dec1.deconv.conv.bias.zero_()
+        dec1.deconv.conv.bias[7] = 1.0
+        dec1.deconv.conv.bias[34] = 1.0
 
     all_params = []
     for dec in [dec5, dec4, dec3, dec2, dec1]:
         all_params.extend(dec.parameters())
-    all_params.extend(mask_head.parameters())
     optimizer = torch.optim.Adam(all_params, lr=1e-3)
 
     t_sl = slice(2, T)
@@ -289,7 +288,7 @@ def test_decoder_chain_learnability():
         d4 = dec4(d5, enc4_out)[..., :33]
         d3 = dec3(d4, enc3_out)[..., :65]
         d2 = dec2(d3, enc2_out)[..., :129]
-        d1 = mask_head(dec1(d2, enc1_out)[..., :F])
+        d1 = dec1(d2, enc1_out)[..., :F]
         output = ccm(d1, mic_stft)
         loss = (output[:, f_sl, t_sl, :] - clean_stft[:, f_sl, t_sl, :]).pow(2).mean()
         if step == 0:
@@ -305,7 +304,7 @@ def test_decoder_chain_learnability():
         d4 = dec4(d5, enc4_out)[..., :33]
         d3 = dec3(d4, enc3_out)[..., :65]
         d2 = dec2(d3, enc2_out)[..., :129]
-        d1_final = mask_head(dec1(d2, enc1_out)[..., :F])
+        d1_final = dec1(d2, enc1_out)[..., :F]
 
     mag = mask_mag_from_raw(d1_final)
     center_mag = mag[:, 7].mean().item()

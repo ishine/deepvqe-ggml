@@ -714,8 +714,7 @@ def test_model_forced_identity_reconstruction():
     # Zero weights so output is purely from bias (identity mask)
     with torch.no_grad():
         model.dec1.deconv.conv.weight.zero_()
-        model.mask_head.weight.zero_()
-        # Bias already set by _init_ccm_identity on mask_head
+        # Bias already set by _init_ccm_identity on dec1.deconv.conv
 
     mic = torch.randn(B, F, T, 2) * 0.5
     ref = torch.randn(B, F, T, 2) * 0.5

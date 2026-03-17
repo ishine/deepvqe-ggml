@@ -81,6 +81,10 @@ class DataConfig:
     single_talk_prob: float = 0.2
     num_train: int = 10000  # only used for DummyAECDataset
     num_val: int = 1000
+    # FixedSynthDataset settings (used with --overfit-real)
+    overfit_delays_ms: List[float] = field(default_factory=lambda: [0, 40, 80, 120, 160, 200, 240, 300])
+    overfit_snr_db: float = 20.0
+    overfit_ser_db: float = 0.0
 
 
 @dataclass

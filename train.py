@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from data.dataset import AECDataset, DummyAECDataset
+from data.dataset import AECDataset, DummyAECDataset, FixedSynthDataset
 from src.config import load_config
 from src.losses import DeepVQELoss, mask_magnitude_regularizer
 from src.model import DeepVQEAEC
@@ -258,8 +258,8 @@ def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device):
             writer.add_figure("delay/distribution_with_gt", fig, epoch)
             plt.close(fig)
 
-        # CCM mask analysis (from mask_head output = 27ch mask)
-        mask_key = "mask_head" if "mask_head" in activation_store else "dec1"
+        # CCM mask analysis (dec1 output = 27ch mask, no BN)
+        mask_key = "dec1"
         if mask_key in activation_store:
             fig = plot_ccm_mask(activation_store[mask_key], diag_mic_stft)
             writer.add_figure("ccm/mask_magnitude", fig, epoch)
@@ -279,7 +279,7 @@ def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device):
     model.train()
 
 
-def train(cfg, resume=None, dummy=False):
+def train(cfg, resume=None, dummy=False, overfit_real=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -321,7 +321,23 @@ def train(cfg, resume=None, dummy=False):
     )
 
     # Dataset
-    if dummy:
+    if overfit_real:
+        target_len = int(cfg.training.clip_length_sec * cfg.audio.sample_rate)
+        train_ds = FixedSynthDataset(
+            clean_dir=cfg.data.clean_dir,
+            noise_dir=cfg.data.noise_dir,
+            farend_dir=cfg.data.farend_dir,
+            rir_dir=cfg.data.rir_dir,
+            delays_ms=cfg.data.overfit_delays_ms,
+            sr=cfg.audio.sample_rate,
+            target_len=target_len,
+            n_fft=cfg.audio.n_fft,
+            hop_length=cfg.audio.hop_length,
+            snr_db=cfg.data.overfit_snr_db,
+            ser_db=cfg.data.overfit_ser_db,
+        )
+        val_ds = train_ds  # same examples for overfit
+    elif dummy:
         train_ds = DummyAECDataset(
             length=cfg.data.num_train,
             target_len=int(cfg.training.clip_length_sec * cfg.audio.sample_rate),
@@ -684,7 +700,10 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/default.yaml", help="Config file")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume from")
     parser.add_argument("--dummy", action="store_true", help="Use dummy dataset for testing")
+    parser.add_argument("--overfit-real", action="store_true",
+                        help="Use FixedSynthDataset (real audio, controlled delays)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    train(cfg, resume=args.resume, dummy=args.dummy)
+    train(cfg, resume=args.resume, dummy=args.dummy,
+          overfit_real=args.overfit_real)

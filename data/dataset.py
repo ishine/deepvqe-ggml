@@ -14,7 +14,14 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data.synth import synthesize_example
+from data.synth import (
+    _load_audio,
+    _load_random_rir,
+    _rms,
+    _scale_to_ser,
+    _scale_to_snr,
+    synthesize_example,
+)
 from src.stft import stft
 
 _CACHE_DIR = Path(".cache/file_lists")
@@ -246,3 +253,104 @@ class DummyAECDataset(Dataset):
                 "scenario": "double_talk",
             },
         }
+
+
+class FixedSynthDataset(Dataset):
+    """Pre-synthesized fixed dataset for overfit testing with real audio.
+
+    Loads one clean, one noise, one far-end, and one RIR file, then creates
+    N examples varying only the echo delay. All examples share the same audio
+    content, so the model must learn delay-dependent echo cancellation.
+    """
+
+    def __init__(self, clean_dir, noise_dir, farend_dir, rir_dir,
+                 delays_ms, sr=16000, target_len=48000, n_fft=512,
+                 hop_length=256, snr_db=20.0, ser_db=0.0):
+        self.sr = sr
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+
+        # Collect file lists and pick deterministic first files
+        clean_files = _collect_audio_files(clean_dir)
+        noise_files = _collect_audio_files(noise_dir)
+        farend_files = _collect_audio_files(farend_dir) or clean_files
+        rir_files = _collect_audio_files(rir_dir)
+
+        assert clean_files, f"No audio files found in {clean_dir}"
+        assert noise_files, f"No audio files found in {noise_dir}"
+
+        # Load audio once (deterministic: always first file, full length)
+        import random as _random
+        state = _random.getstate()
+        _random.seed(42)
+        nearend = _load_audio(clean_files[0], target_len, sr)
+        farend = _load_audio(farend_files[1 % len(farend_files)], target_len, sr)
+        noise = _load_audio(noise_files[0], target_len, sr)
+        rir = _load_random_rir(rir_files) if rir_files else None
+        _random.setstate(state)
+
+        # Apply RIR to near-end
+        if rir is not None:
+            from scipy.signal import fftconvolve
+            nearend_reverbed = fftconvolve(nearend, rir)[:target_len].astype(np.float32)
+            echo_base = fftconvolve(farend, rir)[:target_len].astype(np.float32)
+        else:
+            nearend_reverbed = nearend.copy()
+            echo_base = farend.copy()
+
+        # Pre-synthesize one example per delay
+        self.examples = []
+        for delay_ms in delays_ms:
+            delay_samples = int(delay_ms * sr / 1000)
+
+            # Apply delay to echo
+            echo = echo_base.copy()
+            if delay_samples > 0:
+                echo = np.pad(echo, (delay_samples, 0))[:target_len]
+
+            # Scale echo and noise
+            clean = nearend_reverbed.copy()
+            echo_scaled = _scale_to_ser(nearend_reverbed, echo, ser_db)
+            noise_scaled = _scale_to_snr(nearend_reverbed, noise, snr_db)
+
+            mic = nearend_reverbed + echo_scaled + noise_scaled
+
+            # Normalize to prevent clipping
+            peak = max(np.abs(mic).max(), np.abs(farend).max(), 1e-6)
+            if peak > 0.95:
+                scale = 0.9 / peak
+                mic = mic * scale
+                farend_out = farend * scale
+                clean = clean * scale
+            else:
+                farend_out = farend
+
+            # Compute STFTs
+            mic_t = torch.from_numpy(mic).unsqueeze(0)
+            ref_t = torch.from_numpy(farend_out).unsqueeze(0)
+            clean_t = torch.from_numpy(clean).unsqueeze(0)
+
+            self.examples.append({
+                "mic_stft": stft(mic_t, n_fft, hop_length).squeeze(0),
+                "ref_stft": stft(ref_t, n_fft, hop_length).squeeze(0),
+                "clean_stft": stft(clean_t, n_fft, hop_length).squeeze(0),
+                "mic_wav": mic_t.squeeze(0),
+                "clean_wav": clean_t.squeeze(0),
+                "delay_samples": delay_samples,
+                "metadata": {
+                    "delay_ms": delay_ms,
+                    "delay_samples": delay_samples,
+                    "snr_db": snr_db,
+                    "ser_db": ser_db,
+                    "scenario": "double_talk",
+                },
+            })
+
+        print(f"FixedSynthDataset: {len(self.examples)} examples, "
+              f"delays={delays_ms} ms")
+
+    def __len__(self):
+        return len(self.examples)
+
+    def __getitem__(self, idx):
+        return self.examples[idx % len(self.examples)]
