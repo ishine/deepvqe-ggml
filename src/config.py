@@ -79,12 +79,15 @@ class DataConfig:
     delay_range: Tuple[float, float] = (0, 320)
     max_delay_frames: int = 32
     single_talk_prob: float = 0.2
+    max_rir_length_ms: float = 500.0
+    drr_range: Tuple[float, float] = (0, 20)  # DRR dB, uniform
     num_train: int = 10000  # only used for DummyAECDataset
     num_val: int = 1000
     # FixedSynthDataset settings (used with --overfit-real)
     overfit_delays_ms: List[float] = field(default_factory=lambda: [0, 40, 80, 120, 160, 200, 240, 300])
     overfit_snr_db: float = 20.0
     overfit_ser_db: float = 0.0
+    overfit_repeat: int = 1
 
 
 @dataclass

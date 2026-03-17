@@ -40,7 +40,7 @@ def plot_spectrogram_comparison(mic_stft, enh_stft, clean_stft, sr, hop_length):
     clean_db = _mag_db(clean_stft)
     res_db = enh_db - clean_db
 
-    vmin = min(mic_db.min(), enh_db.min(), clean_db.min())
+    vmin = max(min(mic_db.min(), enh_db.min(), clean_db.min()), -80.0)
     vmax = max(mic_db.max(), enh_db.max(), clean_db.max())
 
     F, T = mic_db.shape
@@ -53,7 +53,8 @@ def plot_spectrogram_comparison(mic_stft, enh_stft, clean_stft, sr, hop_length):
 
     for ax, title, d in zip(axes.flat, titles, data):
         if title == "Residual (enh - clean)":
-            im = ax.pcolormesh(t_axis, f_axis / 1000, d, cmap="RdBu_r", shading="auto")
+            im = ax.pcolormesh(t_axis, f_axis / 1000, d, vmin=-80, vmax=80,
+                               cmap="RdBu_r", shading="auto")
         else:
             im = ax.pcolormesh(t_axis, f_axis / 1000, d, vmin=vmin, vmax=vmax,
                                cmap="magma", shading="auto")
@@ -496,7 +497,7 @@ METRIC_HELP = {
         "general echo delay estimation."
     ),
     "val/erle_db": (
-        "**Echo Return Loss Enhancement** in dB.  \n"
+        "**Echo Return Loss Enhancement** in dB (all scenarios averaged).  \n"
         "ERLE = 10*log10(|mic-clean|^2 / |enhanced-clean|^2).  \n"
         "Measures how much echo+noise power the model removes.  \n\n"
         "**Interpretation:**\n"
@@ -509,6 +510,25 @@ METRIC_HELP = {
         "but ERLE doesn't improve, the model is optimizing the wrong thing.  \n"
         "**Watch for:** ERLE plateau while loss still drops — may indicate "
         "the loss function doesn't correlate well with perceptual quality."
+    ),
+    "val/erle_single_talk_farend": (
+        "**ERLE on far-end single-talk (FEST).** Near-end is silent, "
+        "mic = echo + noise. Measures pure echo cancellation ability. "
+        "Paper reports 65.70 dB on FEST."
+    ),
+    "val/erle_double_talk": (
+        "**ERLE on double-talk.** Both speakers active. Less meaningful than "
+        "PESQ/STOI here since ERLE can't distinguish echo removal from "
+        "near-end speech suppression."
+    ),
+    "val/pesq_double_talk": (
+        "**PESQ on double-talk.** Wideband PESQ (1.0-4.5 scale). "
+        "Measures perceptual speech quality of the enhanced signal. "
+        "Target: >3.0 for good quality."
+    ),
+    "val/stoi_double_talk": (
+        "**STOI on double-talk.** Extended STOI (0-1 scale). "
+        "Measures speech intelligibility. Target: >0.85."
     ),
 
     # -- Per-layer gradient norms --

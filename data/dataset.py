@@ -17,7 +17,6 @@ from torch.utils.data import Dataset
 from data.synth import (
     _load_audio,
     _load_random_rir,
-    _rms,
     _scale_to_ser,
     _scale_to_snr,
     synthesize_example,
@@ -95,6 +94,8 @@ class AECDataset(Dataset):
         self.ser_range = tuple(cfg.data.ser_range)
         self.delay_range = tuple(cfg.data.delay_range)
         self.single_talk_prob = cfg.data.single_talk_prob
+        self.max_rir_length_ms = cfg.data.max_rir_length_ms
+        self.drr_range = tuple(cfg.data.drr_range)
 
         all_clean = _collect_audio_files(cfg.data.clean_dir)
         self.noise_files = _collect_audio_files(cfg.data.noise_dir)
@@ -131,6 +132,8 @@ class AECDataset(Dataset):
             ser_range=self.ser_range,
             delay_range=self.delay_range,
             single_talk_prob=self.single_talk_prob,
+            max_rir_length_ms=self.max_rir_length_ms,
+            drr_range=self.drr_range,
         )
 
         # Convert to tensors and compute STFTs
@@ -265,10 +268,12 @@ class FixedSynthDataset(Dataset):
 
     def __init__(self, clean_dir, noise_dir, farend_dir, rir_dir,
                  delays_ms, sr=16000, target_len=48000, n_fft=512,
-                 hop_length=256, snr_db=20.0, ser_db=0.0):
+                 hop_length=256, snr_db=20.0, ser_db=0.0, repeat=1,
+                 max_rir_length_ms=None, drr_db=None):
         self.sr = sr
         self.n_fft = n_fft
         self.hop_length = hop_length
+        self.repeat = repeat
 
         # Collect file lists and pick deterministic first files
         clean_files = _collect_audio_files(clean_dir)
@@ -286,7 +291,8 @@ class FixedSynthDataset(Dataset):
         nearend = _load_audio(clean_files[0], target_len, sr)
         farend = _load_audio(farend_files[1 % len(farend_files)], target_len, sr)
         noise = _load_audio(noise_files[0], target_len, sr)
-        rir = _load_random_rir(rir_files) if rir_files else None
+        max_rir_samples = int(max_rir_length_ms * sr / 1000) if max_rir_length_ms else None
+        rir = _load_random_rir(rir_files, max_rir_samples) if rir_files else None
         _random.setstate(state)
 
         # Apply RIR to near-end
@@ -298,6 +304,14 @@ class FixedSynthDataset(Dataset):
             nearend_reverbed = nearend.copy()
             echo_base = farend.copy()
 
+        # DRR mixing for mic near-end component
+        if drr_db is not None and rir is not None:
+            drr_linear = 10 ** (drr_db / 10)
+            alpha = drr_linear / (1 + drr_linear)
+            nearend_in_mic = (alpha * nearend + (1 - alpha) * nearend_reverbed).astype(np.float32)
+        else:
+            nearend_in_mic = nearend_reverbed
+
         # Pre-synthesize one example per delay
         self.examples = []
         for delay_ms in delays_ms:
@@ -308,12 +322,12 @@ class FixedSynthDataset(Dataset):
             if delay_samples > 0:
                 echo = np.pad(echo, (delay_samples, 0))[:target_len]
 
-            # Scale echo and noise
-            clean = nearend_reverbed.copy()
-            echo_scaled = _scale_to_ser(nearend_reverbed, echo, ser_db)
-            noise_scaled = _scale_to_snr(nearend_reverbed, noise, snr_db)
+            # Scale echo and noise; target is dry nearend
+            clean = nearend.copy()
+            echo_scaled = _scale_to_ser(nearend_in_mic, echo, ser_db)
+            noise_scaled = _scale_to_snr(nearend_in_mic, noise, snr_db)
 
-            mic = nearend_reverbed + echo_scaled + noise_scaled
+            mic = nearend_in_mic + echo_scaled + noise_scaled
 
             # Normalize to prevent clipping
             peak = max(np.abs(mic).max(), np.abs(farend).max(), 1e-6)
@@ -342,15 +356,16 @@ class FixedSynthDataset(Dataset):
                     "delay_samples": delay_samples,
                     "snr_db": snr_db,
                     "ser_db": ser_db,
+                    "drr_db": drr_db,
                     "scenario": "double_talk",
                 },
             })
 
-        print(f"FixedSynthDataset: {len(self.examples)} examples, "
-              f"delays={delays_ms} ms")
+        print(f"FixedSynthDataset: {len(self.examples)} examples × {repeat} repeat "
+              f"= {len(self.examples) * repeat} virtual, delays={delays_ms} ms")
 
     def __len__(self):
-        return len(self.examples)
+        return len(self.examples) * self.repeat
 
     def __getitem__(self, idx):
         return self.examples[idx % len(self.examples)]

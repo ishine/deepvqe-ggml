@@ -11,6 +11,7 @@ Features:
 
 import argparse
 import random
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -20,9 +21,12 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+from collections import defaultdict
+
 from data.dataset import AECDataset, DummyAECDataset, FixedSynthDataset
 from src.config import load_config
 from src.losses import DeepVQELoss, mask_magnitude_regularizer
+from src.metrics import compute_pesq, compute_stoi
 from src.model import DeepVQEAEC
 from src.stft import istft
 from src.viz import (
@@ -286,19 +290,11 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
         torch.set_float32_matmul_precision("high")
     print(f"Device: {device}")
 
-    # Create directories
-    ckpt_dir = Path(cfg.paths.checkpoint_dir)
+    # Create timestamped run directories so each run is separate in TensorBoard
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ckpt_dir = Path(cfg.paths.checkpoint_dir) / run_id
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = Path(cfg.paths.log_dir)
-
-    # Clean stale TensorBoard event files from previous runs so they don't
-    # pollute the dashboard with overlapping / misleading data.
-    if not resume:
-        stale = list(log_dir.glob("events.out.tfevents.*"))
-        if stale:
-            print(f"Cleaning {len(stale)} stale event file(s) from {log_dir}")
-            for f in stale:
-                f.unlink()
+    log_dir = Path(cfg.paths.log_dir) / run_id
 
     writer = SummaryWriter(log_dir)
 
@@ -335,6 +331,9 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
             hop_length=cfg.audio.hop_length,
             snr_db=cfg.data.overfit_snr_db,
             ser_db=cfg.data.overfit_ser_db,
+            repeat=cfg.data.overfit_repeat,
+            max_rir_length_ms=cfg.data.max_rir_length_ms,
+            drr_db=cfg.data.drr_range[0],
         )
         val_ds = train_ds  # same examples for overfit
     elif dummy:
@@ -562,8 +561,12 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
         if cfg.loss.mask_reg_weight > 0:
             val_losses["mask_reg"] = 0
         val_delay_acc = 0
-        val_erle = 0
         n_val = 0
+        scenario_erle = defaultdict(list)
+        scenario_pesq = defaultdict(list)
+        scenario_stoi = defaultdict(list)
+        pesq_count = 0
+        pesq_budget = cfg.eval.pesq_subset
         # Collect diverse samples for TensorBoard: pick random batches/indices
         n_tb_samples = min(cfg.eval.audio_samples, len(val_loader))
         tb_batch_indices = set(random.sample(range(len(val_loader)), n_tb_samples))
@@ -598,16 +601,39 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                     components["mask_reg"] = mask_reg
                     components["total"] = components["total"] + cfg.loss.mask_reg_weight * mask_reg
 
-                # ERLE
+                # ERLE + per-scenario metrics
                 length = clean_wav.shape[-1]
                 mic_wav = batch["mic_wav"].to(device, non_blocking=True)
                 enh_wav = istft(enhanced, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
-                erle = compute_erle(mic_wav, enh_wav, clean_wav)
+
+                # Per-sample scenario breakdown
+                batch_metadata = batch["metadata"]
+                sr = cfg.audio.sample_rate
+                for i in range(mic_wav.shape[0]):
+                    sc = batch_metadata[i]["scenario"]
+                    # Per-sample ERLE
+                    echo_i = mic_wav[i] - clean_wav[i]
+                    res_i = enh_wav[i] - clean_wav[i]
+                    erle_i = 10 * torch.log10(
+                        (echo_i ** 2).sum() / ((res_i ** 2).sum() + 1e-10)
+                    ).item()
+                    scenario_erle[sc].append(erle_i)
+
+                    # PESQ/STOI for double-talk only (budget-limited)
+                    if sc == "double_talk" and pesq_count < pesq_budget:
+                        enh_np = enh_wav[i].float().cpu().numpy()
+                        cln_np = clean_wav[i].float().cpu().numpy()
+                        pesq_score = compute_pesq(cln_np, enh_np, sr=sr)
+                        stoi_score = compute_stoi(cln_np, enh_np, sr=sr)
+                        if pesq_score is not None:
+                            scenario_pesq[sc].append(pesq_score)
+                        if stoi_score is not None:
+                            scenario_stoi[sc].append(stoi_score)
+                        pesq_count += 1
 
                 for k in val_losses:
                     val_losses[k] += components[k].item()
                 val_delay_acc += delay_acc.item()
-                val_erle += erle.item()
                 n_val += 1
 
                 if batch_idx in tb_batch_indices:
@@ -620,9 +646,20 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
             val_losses[k] /= max(n_val, 1)
             add_scalar_with_help(writer, f"val/{k}", val_losses[k], epoch)
         val_delay_acc /= max(n_val, 1)
-        val_erle /= max(n_val, 1)
         add_scalar_with_help(writer, "val/delay_acc", val_delay_acc, epoch)
+
+        # Per-scenario ERLE
+        for sc, values in scenario_erle.items():
+            add_scalar_with_help(writer, f"val/erle_{sc}", np.mean(values), epoch)
+        # Overall ERLE (aggregate across all scenarios)
+        all_erle = [v for vals in scenario_erle.values() for v in vals]
+        val_erle = np.mean(all_erle) if all_erle else 0.0
         add_scalar_with_help(writer, "val/erle_db", val_erle, epoch)
+        # PESQ/STOI for double-talk
+        for sc, values in scenario_pesq.items():
+            add_scalar_with_help(writer, f"val/pesq_{sc}", np.mean(values), epoch)
+        for sc, values in scenario_stoi.items():
+            add_scalar_with_help(writer, f"val/stoi_{sc}", np.mean(values), epoch)
 
         # Step epoch scheduler (only after warmup)
         if warmup_done:
@@ -633,16 +670,26 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
         if not warmup_done and (epoch + 1) >= cfg.training.warmup_epochs:
             warmup_done = True
 
-        print(
+        # Build per-scenario metric summary
+        metric_parts = [
             f"Epoch {epoch+1}: train_loss={epoch_losses['total']:.4f}, "
             f"val_loss={val_losses['total']:.4f}, "
             f"delay_acc={val_delay_acc:.1%}, erle={val_erle:+.1f}dB, "
             f"lr={optimizer.param_groups[0]['lr']:.2e}"
-        )
+        ]
+        for sc, values in scenario_erle.items():
+            part = f"  {sc}: erle={np.mean(values):+.1f}dB (n={len(values)})"
+            if sc in scenario_pesq and scenario_pesq[sc]:
+                part += f", pesq={np.mean(scenario_pesq[sc]):.2f}"
+            if sc in scenario_stoi and scenario_stoi[sc]:
+                part += f", stoi={np.mean(scenario_stoi[sc]):.3f}"
+            metric_parts.append(part)
+        print("\n".join(metric_parts))
 
         # Log audio/spectrograms
         if val_sample_batches:
             log_audio_and_spectrograms(writer, model, val_sample_batches, epoch, cfg, device)
+            print(f"  Logged {len(val_sample_batches)} audio sample(s) to TensorBoard")
 
         # Checkpointing
         if (epoch + 1) % cfg.training.checkpoint_every == 0:

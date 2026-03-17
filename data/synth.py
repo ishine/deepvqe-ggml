@@ -65,14 +65,21 @@ def _load_random_audio(file_list, target_len, sr=16000):
     return _load_audio(random.choice(file_list), target_len, sr)
 
 
-def _load_random_rir(rir_list):
-    """Load a random RIR."""
+def _load_random_rir(rir_list, max_length_samples=None):
+    """Load a random RIR, optionally truncated with fade-out."""
     path = random.choice(rir_list)
     rir, _ = sf.read(path, dtype="float32")
     if rir.ndim > 1:
         rir = rir[:, 0]
     # Normalize RIR
     rir = rir / (np.abs(rir).max() + 1e-12)
+    # Truncate if requested
+    if max_length_samples is not None and len(rir) > max_length_samples:
+        rir = rir[:max_length_samples]
+        # Cosine fade-out over last 10ms (160 samples at 16kHz)
+        fade_len = min(160, max_length_samples)
+        fade = np.cos(np.linspace(0, np.pi / 2, fade_len)).astype(np.float32) ** 2
+        rir[-fade_len:] *= fade
     return rir
 
 
@@ -107,6 +114,8 @@ def synthesize_example(
     ser_range=(-10, 10),
     delay_range=(0, 320),
     single_talk_prob=0.2,
+    max_rir_length_ms=None,
+    drr_range=None,
 ):
     """Synthesize a single AEC training example.
 
@@ -114,12 +123,14 @@ def synthesize_example(
         clean_path: path to the clean near-end speech file
         noise_files: list of noise file paths (one chosen randomly)
         farend_files: list of far-end file paths (one chosen randomly)
+        max_rir_length_ms: truncate RIRs to this length (None = no truncation)
+        drr_range: (min_db, max_db) direct-to-reverberant ratio for mic near-end
 
     Returns:
         mic: (N,) microphone signal
         ref: (N,) far-end reference signal (before RIR)
-        clean: (N,) clean near-end speech (reverbed)
-        metadata: dict with delay_ms, snr_db, ser_db, scenario
+        clean: (N,) clean near-end speech (dry, anechoic)
+        metadata: dict with delay_ms, snr_db, ser_db, drr_db, scenario
     """
     # Sample audio
     nearend = _load_audio(clean_path, target_len, sr)
@@ -129,18 +140,32 @@ def synthesize_example(
     # Decide scenario
     is_single_talk = random.random() < single_talk_prob
 
+    max_rir_samples = int(max_rir_length_ms * sr / 1000) if max_rir_length_ms else None
+
     # Apply near-end RIR (reverberation)
     if rir_files:
-        nearend_rir = _load_random_rir(rir_files)
+        nearend_rir = _load_random_rir(rir_files, max_rir_samples)
         nearend_reverbed = fftconvolve(nearend, nearend_rir)[:target_len].astype(
             np.float32
         )
     else:
         nearend_reverbed = nearend.copy()
 
+    # DRR mixing: blend dry and reverbed near-end for mic signal
+    drr_db = None
+    if drr_range is not None and rir_files:
+        drr_db = random.uniform(*drr_range)
+        drr_linear = 10 ** (drr_db / 10)
+        alpha = drr_linear / (1 + drr_linear)
+        nearend_in_mic = (alpha * nearend + (1 - alpha) * nearend_reverbed).astype(
+            np.float32
+        )
+    else:
+        nearend_in_mic = nearend_reverbed
+
     # Create echo path
     if rir_files:
-        farend_rir = _load_random_rir(rir_files)
+        farend_rir = _load_random_rir(rir_files, max_rir_samples)
         echo = fftconvolve(farend, farend_rir)[:target_len].astype(np.float32)
     else:
         echo = farend.copy()
@@ -157,23 +182,23 @@ def synthesize_example(
 
     # Scale components
     if is_single_talk:
-        nearend_reverbed = np.zeros_like(nearend_reverbed)
+        nearend_in_mic = np.zeros_like(nearend)
         clean = np.zeros_like(nearend)
         scenario = "single_talk_farend"
     else:
-        clean = nearend_reverbed.copy()
+        clean = nearend.copy()
         scenario = "double_talk"
 
     # Scale echo and noise relative to near-end (or to echo if single-talk)
-    if not is_single_talk and _rms(nearend_reverbed) > 1e-6:
-        echo = _scale_to_ser(nearend_reverbed, echo, ser_db)
-        noise = _scale_to_snr(nearend_reverbed, noise, snr_db)
+    if not is_single_talk and _rms(nearend_in_mic) > 1e-6:
+        echo = _scale_to_ser(nearend_in_mic, echo, ser_db)
+        noise = _scale_to_snr(nearend_in_mic, noise, snr_db)
     else:
         # Single talk: noise relative to echo
         noise = _scale_to_snr(echo, noise, snr_db)
 
     # Mix
-    mic = nearend_reverbed + echo + noise
+    mic = nearend_in_mic + echo + noise
 
     # Normalize to prevent clipping
     peak = max(np.abs(mic).max(), np.abs(farend).max(), 1e-6)
@@ -190,6 +215,7 @@ def synthesize_example(
         "delay_samples": delay_samples,
         "snr_db": snr_db,
         "ser_db": ser_db,
+        "drr_db": drr_db,
         "scenario": scenario,
     }
 
