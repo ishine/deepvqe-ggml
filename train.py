@@ -39,8 +39,7 @@ from src.viz import (
     plot_delay_with_gt,
     plot_encoder_activations,
     plot_spectrogram_comparison,
-    register_hooks,
-    remove_hooks,
+    ActivationCapture,
 )
 
 
@@ -200,23 +199,24 @@ def manage_checkpoints(ckpt_dir, keep_n):
         ckpts.pop(0).unlink()
 
 
-def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device):
+def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device,
+                               act_capture):
     """Log audio samples, spectrograms, and diagnostic figures to TensorBoard.
 
     Args:
         val_batches: list of (batch, sample_idx) tuples — diverse validation
             examples chosen randomly each epoch.
+        act_capture: ActivationCapture instance (persistent hooks, avoids
+            torch.compile recompilation).
     """
     import matplotlib.pyplot as plt
 
-    raw_model = _unwrap(model)
     model.eval()
 
     # Use first sample for diagnostic figures (activations, CCM, delay)
     diag_batch, diag_idx = val_batches[0]
 
-    # Register hooks for activation capture
-    activation_store, hook_handles = register_hooks(raw_model)
+    act_capture.enable()
 
     diag_delay_dist = None
     diag_mic_stft = None
@@ -248,10 +248,14 @@ def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device):
             writer.add_figure(f"spectrograms/comparison_{i}", fig, epoch)
             plt.close(fig)
 
-            # Capture activations/diagnostics from first sample
+            # Capture activations/diagnostics from first sample only;
+            # disable capture for remaining samples to avoid overhead
             if i == 0:
                 diag_delay_dist = delay_dist
                 diag_mic_stft = mic_stft
+                act_capture.disable()
+
+        activation_store = act_capture.store
 
         # Delay distribution with ground truth (first sample)
         if diag_delay_dist is not None:
@@ -263,9 +267,8 @@ def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device):
             plt.close(fig)
 
         # CCM mask analysis (dec1 output = 27ch mask, no BN)
-        mask_key = "dec1"
-        if mask_key in activation_store:
-            fig = plot_ccm_mask(activation_store[mask_key], diag_mic_stft)
+        if "dec1" in activation_store:
+            fig = plot_ccm_mask(activation_store["dec1"], diag_mic_stft)
             writer.add_figure("ccm/mask_magnitude", fig, epoch)
             plt.close(fig)
 
@@ -279,7 +282,6 @@ def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device):
             writer.add_figure("activations/statistics", fig, epoch)
             plt.close(fig)
 
-    remove_hooks(hook_handles)
     model.train()
 
 
@@ -298,10 +300,11 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
 
     writer = SummaryWriter(log_dir)
 
-    # Model
+    # Model — register hooks before torch.compile so dynamo guards are stable
     model = DeepVQEAEC.from_config(cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {n_params:,}")
+    act_capture = ActivationCapture(model)
     if device.type == "cuda":
         model = torch.compile(model)
         print("Model compiled with torch.compile")
@@ -688,7 +691,8 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
 
         # Log audio/spectrograms
         if val_sample_batches:
-            log_audio_and_spectrograms(writer, model, val_sample_batches, epoch, cfg, device)
+            log_audio_and_spectrograms(writer, model, val_sample_batches, epoch, cfg, device,
+                                       act_capture=act_capture)
             print(f"  Logged {len(val_sample_batches)} audio sample(s) to TensorBoard")
 
         # Checkpointing

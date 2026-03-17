@@ -274,19 +274,14 @@ def plot_activation_stats(activation_dict):
 # Hook registration
 # ---------------------------------------------------------------------------
 
-def register_hooks(model):
-    """Register forward hooks on key layers to capture activations.
+class ActivationCapture:
+    """Persistent forward-hook manager that avoids torch.compile recompilation.
 
-    Args:
-        model: DeepVQEAEC instance (unwrapped)
-
-    Returns:
-        (activation_store, hook_handles)
+    Register once before torch.compile; enable/disable capture as needed.
+    Because hooks are never added or removed, dynamo guards stay stable.
     """
-    activation_store = {}
-    hook_handles = []
 
-    target_names = [
+    TARGET_NAMES = [
         "fe_mic", "fe_ref",
         "mic_enc1", "mic_enc2", "mic_enc3", "mic_enc4", "mic_enc5",
         "far_enc1", "far_enc2",
@@ -295,30 +290,33 @@ def register_hooks(model):
         "ccm",
     ]
 
-    for name in target_names:
-        module = getattr(model, name, None)
-        if module is None:
-            continue
+    def __init__(self, model):
+        self.store = {}
+        self._enabled = False
 
-        def _make_hook(n):
-            def hook_fn(module, input, output):
-                # AlignBlock returns tuple when return_delay=True
-                if isinstance(output, tuple):
-                    activation_store[n] = output[0].detach().cpu()
-                else:
-                    activation_store[n] = output.detach().cpu()
-            return hook_fn
+        for name in self.TARGET_NAMES:
+            module = getattr(model, name, None)
+            if module is None:
+                continue
 
-        h = module.register_forward_hook(_make_hook(name))
-        hook_handles.append(h)
+            def _make_hook(n):
+                def hook_fn(module, input, output):
+                    if not self._enabled:
+                        return
+                    if isinstance(output, tuple):
+                        self.store[n] = output[0].detach().cpu()
+                    else:
+                        self.store[n] = output.detach().cpu()
+                return hook_fn
 
-    return activation_store, hook_handles
+            module.register_forward_hook(_make_hook(name))
 
+    def enable(self):
+        self.store.clear()
+        self._enabled = True
 
-def remove_hooks(hook_handles):
-    """Remove all registered hooks."""
-    for h in hook_handles:
-        h.remove()
+    def disable(self):
+        self._enabled = False
 
 
 # ---------------------------------------------------------------------------
