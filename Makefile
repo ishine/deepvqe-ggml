@@ -82,6 +82,11 @@ eval: build ## Evaluate a checkpoint (set CHECKPOINT=path)
 	$(DOCKER_RUN) $(IMAGE) \
 		python eval.py --config $(CONFIG) --checkpoint $(CHECKPOINT) $(EXTRA_ARGS)
 
+.PHONY: listen
+listen: build ## Generate WAV audio from checkpoint (set CHECKPOINT=path)
+	$(DOCKER_RUN) $(IMAGE) \
+		python scripts/listen.py --config $(CONFIG) --checkpoint $(CHECKPOINT) $(EXTRA_ARGS)
+
 .PHONY: export
 export: build ## Export checkpoint to GGUF (set CHECKPOINT=path)
 	$(DOCKER_RUN) \
@@ -89,6 +94,44 @@ export: build ## Export checkpoint to GGUF (set CHECKPOINT=path)
 		$(IMAGE) \
 		python export_ggml.py --config $(CONFIG) --checkpoint $(CHECKPOINT) \
 			--output output/deepvqe.gguf $(EXTRA_ARGS)
+
+# ── GGML Build ──────────────────────────────────────────────────────────────
+
+.PHONY: build-ggml
+build-ggml: ## Build GGML C++ inference binary
+	nix develop -c bash -c 'cd ggml && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$$(nproc)'
+
+.PHONY: test-ggml
+test-ggml: build-ggml ## Run all GGML block tests against PyTorch intermediates
+	@echo "=== FE ==="
+	ggml/build/test_fe --input intermediates/blocks/fe_mic_input.npy --expected intermediates/blocks/fe_mic_output.npy
+	@echo "=== Encoder ==="
+	ggml/build/test_encoder --gguf deepvqe.gguf --block mic_enc1 --input intermediates/blocks/mic_enc1_input.npy --expected intermediates/blocks/mic_enc1_output.npy
+	@echo "=== Bottleneck ==="
+	ggml/build/test_bottleneck --gguf deepvqe.gguf --input intermediates/blocks/bottleneck_input.npy --expected intermediates/blocks/bottleneck_output.npy
+	@echo "=== Decoder ==="
+	ggml/build/test_decoder --gguf deepvqe.gguf --block dec5 --input-0 intermediates/blocks/dec5_input_0.npy --input-1 intermediates/blocks/dec5_input_1.npy --expected intermediates/blocks/dec5_output.npy
+	@echo "=== CCM ==="
+	ggml/build/test_ccm --input-mask intermediates/blocks/ccm_input_0.npy --input-stft intermediates/blocks/ccm_input_1.npy --expected intermediates/blocks/ccm_output.npy
+	@echo "=== AlignBlock ==="
+	ggml/build/test_align --gguf deepvqe.gguf --input-mic intermediates/blocks/align_input_0.npy --input-ref intermediates/blocks/align_input_1.npy --expected intermediates/blocks/align_output.npy
+	@echo "=== All block tests passed ==="
+
+# ── GGML Comparison ─────────────────────────────────────────────────────────
+
+BLOCK ?= mic_enc1
+
+.PHONY: compare-pt
+compare-pt: build ## Export PyTorch intermediates for GGML comparison
+	$(DOCKER_RUN) $(IMAGE) \
+		python ggml/compare.py --mode pytorch --checkpoint $(CHECKPOINT) \
+			--output intermediates/pytorch --use-audio $(EXTRA_ARGS)
+
+.PHONY: compare-block
+compare-block: build ## Export single block I/O (set BLOCK=mic_enc1)
+	$(DOCKER_RUN) $(IMAGE) \
+		python ggml/compare.py --mode block --checkpoint $(CHECKPOINT) \
+			--block $(BLOCK) --output intermediates/blocks --use-audio $(EXTRA_ARGS)
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 

@@ -10,15 +10,19 @@ noise suppression, and dereverberation.
 
 ## Status
 
-Phases 0-4 complete, Phase 5 (GGML) has export + skeleton C++ + comparison
-infrastructure. Model verified (7.97M params, causality OK, all gradients flow,
-AMP works). Data pipeline verified with DNS5 real data (157K clean, 64K noise,
-60K RIR files). All training data packed into a single squashfs image
-(dns5.sqsh), mounted via Docker entrypoint.
-Evaluation script produces ERLE/PESQ/STOI/segSNR metrics, spectrograms, and
-delay heatmaps. GGUF export with BN folding verified (max error 3.9e-6).
+Phases 0-4 complete, Phase 5 (GGML) has export + block-by-block C++ verification.
+Model verified (7.97M params, causality OK, all gradients flow, AMP works).
+Data pipeline verified with DNS5 real data (157K clean, 64K noise, 60K RIR files).
+All training data packed into a single squashfs image (dns5.sqsh), mounted via
+Docker entrypoint.
+Evaluation script produces ERLE/PESQ/STOI/segSNR metrics, spectrograms,
+delay heatmaps, and WAV audio files. GGUF export with BN folding verified
+(max error 1.26e-6). All 6 C++ block tests pass (max error < 6e-6):
+FE, EncoderBlock, Bottleneck (GRU+Linear), DecoderBlock (SubpixelConv2d),
+CCM, AlignBlock.
 
 Uses Docker for training (`make build && make train-minimal`).
+Uses nix flake for C++ build (`nix develop` provides cmake + gcc).
 
 ## Running Python Code
 
@@ -126,8 +130,17 @@ deepvqe/
     deepvqe_xr.py               # Xiaobin-Rong NS-only impl (real-valued CCM)
     deepvqe_xr_v1.py            # Xiaobin-Rong NS-only impl (complex CCM)
   ggml/
-    deepvqe.cpp                 # C++ GGML inference
-    compare.py                  # Layer-by-layer comparison
+    CMakeLists.txt              # CMake build (uses ggml submodule)
+    common.h / common.cpp       # .npy I/O, comparison utilities
+    deepvqe.cpp                 # C++ GGML inference (GGUF loading + model struct)
+    compare.py                  # Layer-by-layer comparison (real audio + block export)
+    test_fe.cpp                 # FE block test
+    test_encoder.cpp            # EncoderBlock test
+    test_bottleneck.cpp         # Bottleneck (GRU+Linear) test
+    test_decoder.cpp            # DecoderBlock test
+    test_ccm.cpp                # CCM test
+    test_align.cpp              # AlignBlock test
+    vendor/ggml/                # ggml library (git submodule)
   pyproject.toml                # uv project config
 ```
 
@@ -189,12 +202,21 @@ deepvqe/
 
 ### Phase 5: GGML Conversion
 - [x] `export_ggml.py` — BN folding + GGUF export via gguf package
-- [x] `ggml/deepvqe.cpp` — C++ skeleton (ELU, GRU, softmax, FE helpers)
-- [x] `ggml/compare.py` — Layer-by-layer comparison infrastructure (146 layers captured)
-- [x] BN folding verified (max error 3.9e-6)
-- [ ] Full C++ GGML compute graph implementation
-- [ ] Layer-by-layer max error < 1e-4 (f32)
-- [ ] End-to-end max error < 1e-3 (f32)
+- [x] `ggml/deepvqe.cpp` — GGUF loading + model struct + helper functions
+- [x] `ggml/compare.py` — Layer-by-layer comparison with real audio + block-level export
+- [x] `ggml/common.{h,cpp}` — .npy I/O, comparison utilities
+- [x] `ggml/CMakeLists.txt` — CMake build with ggml submodule (static linking)
+- [x] BN folding verified (max error 1.26e-6)
+- [x] Block-by-block C++ verification (all < 6e-6 max error):
+  - [x] `test_fe` — FE power-law (max 2.38e-7)
+  - [x] `test_encoder` — EncoderBlock: Conv2d + ELU + ResidualBlock (max 5.72e-6)
+  - [x] `test_bottleneck` — GRU + Linear (max 3.81e-6 over 188 steps)
+  - [x] `test_decoder` — DecoderBlock: skip + SubpixelConv2d + ChannelAffine (max 4.05e-6)
+  - [x] `test_ccm` — CCM: 3x3 complex convolving mask (max 1.19e-7)
+  - [x] `test_align` — AlignBlock: cross-attention soft delay (max 5.25e-6)
+- [x] `scripts/listen.py` — WAV audio export (mic/enhanced/clean)
+- [x] Full C++ GGML forward pass (all blocks composed in deepvqe.cpp)
+- [x] End-to-end max error 8.58e-6 (target < 1e-3), all 17 layers OK
 - [ ] Runs faster than real-time
 - [ ] PTQ q8_0: PESQ drop < 0.2
 

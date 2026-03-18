@@ -15,6 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import soundfile as sf
 import torch
 
 from data.dataset import AECDataset, DummyAECDataset
@@ -150,10 +151,13 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
                         save_path=out_dir / "delays" / f"delay_{i:04d}.png",
                     )
 
-                # Save audio (as raw float32 .npy for simplicity)
+                # Save audio as .npy (for programmatic access) and .wav (for listening)
                 np.save(out_dir / "audio" / f"mic_{i:04d}.npy", mic_np)
                 np.save(out_dir / "audio" / f"enhanced_{i:04d}.npy", enh_np)
                 np.save(out_dir / "audio" / f"clean_{i:04d}.npy", clean_np)
+                sf.write(out_dir / "audio" / f"mic_{i:04d}.wav", mic_np, sr, subtype="PCM_16")
+                sf.write(out_dir / "audio" / f"enhanced_{i:04d}.wav", enh_np, sr, subtype="PCM_16")
+                sf.write(out_dir / "audio" / f"clean_{i:04d}.wav", clean_np, sr, subtype="PCM_16")
 
             if (i + 1) % 10 == 0 or i == n_samples - 1:
                 print(f"  Evaluated {i+1}/{n_samples}")

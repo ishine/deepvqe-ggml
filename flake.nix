@@ -13,6 +13,9 @@
         packages = [
           pkgs.squashfsTools # mksquashfs, unsquashfs
           pkgs.squashfuse    # squashfuse (FUSE mount)
+          pkgs.cmake         # GGML C++ build
+          pkgs.gcc           # C/C++ compiler
+          pkgs.pkg-config
         ];
       };
     };

@@ -18,6 +18,10 @@ datasets_fullband/
 # Caches
 .cache/
 
+# GGML build artifacts
+ggml/build/
+intermediates/
+
 # IDE / tool
 .claude/
 tb_images
