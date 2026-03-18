@@ -13,6 +13,8 @@ Features:
 
 import argparse
 import random
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -23,9 +25,10 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from data.dataset import AECDataset, DummyAECDataset
+from data.dataset import AECDataset, DummyAECDataset, FixedSynthDataset
 from src.config import load_config
 from src.losses import DeepVQELoss, mask_magnitude_regularizer
+from src.metrics import compute_pesq, compute_stoi
 from src.model import DeepVQEAEC
 from src.stft import istft
 from src.viz import (
@@ -38,8 +41,7 @@ from src.viz import (
     plot_delay_with_gt,
     plot_encoder_activations,
     plot_spectrogram_comparison,
-    register_hooks,
-    remove_hooks,
+    ActivationCapture,
 )
 
 
@@ -200,55 +202,77 @@ def manage_checkpoints(ckpt_dir, keep_n):
         ckpts.pop(0).unlink()
 
 
-def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device,
-                               accelerator=None):
-    """Log audio samples, spectrograms, and diagnostic figures to TensorBoard."""
+def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device,
+                               accelerator=None, act_capture=None):
+    """Log audio samples, spectrograms, and diagnostic figures to TensorBoard.
+
+    Args:
+        val_batches: list of (batch, sample_idx) tuples — diverse validation
+            examples chosen randomly each epoch.
+        act_capture: ActivationCapture instance (persistent hooks, avoids
+            torch.compile recompilation).
+    """
     import matplotlib.pyplot as plt
 
     raw_model = _unwrap(model, accelerator)
     model.eval()
 
-    # Register hooks for activation capture
-    activation_store, hook_handles = register_hooks(raw_model)
+    # Use first sample for diagnostic figures (activations, CCM, delay)
+    diag_batch, diag_idx = val_batches[0]
+
+    act_capture.enable()
+
+    diag_delay_dist = None
+    diag_mic_stft = None
 
     with torch.no_grad():
-        mic_stft = val_batch["mic_stft"][:1].to(device)
-        ref_stft = val_batch["ref_stft"][:1].to(device)
-        clean_stft = val_batch["clean_stft"][:1].to(device)
+        # Log multiple audio samples for review
+        for i, (batch, sample_idx) in enumerate(val_batches):
+            mic_stft = batch["mic_stft"][sample_idx:sample_idx+1].to(device)
+            ref_stft = batch["ref_stft"][sample_idx:sample_idx+1].to(device)
+            clean_stft = batch["clean_stft"][sample_idx:sample_idx+1].to(device)
 
-        # Use unwrapped model for inference to avoid DDP forward issues with B=1
-        enhanced, delay_dist, mask_raw = raw_model(mic_stft, ref_stft, return_delay=True)
-        length = val_batch["clean_wav"].shape[-1]
+            enhanced, delay_dist, mask_raw = raw_model(mic_stft, ref_stft, return_delay=True)
+            length = batch["clean_wav"].shape[-1]
 
-        mic_wav = istft(mic_stft, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
-        enh_wav = istft(enhanced, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
-        clean_wav = val_batch["clean_wav"][:1].to(device)
+            mic_wav = istft(mic_stft, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
+            enh_wav = istft(enhanced, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
+            clean_wav = batch["clean_wav"][sample_idx:sample_idx+1].to(device)
 
-        sr = cfg.audio.sample_rate
-        writer.add_audio("audio/mic", mic_wav[0].cpu(), epoch, sample_rate=sr)
-        writer.add_audio("audio/enhanced", enh_wav[0].cpu(), epoch, sample_rate=sr)
-        writer.add_audio("audio/clean", clean_wav[0].cpu(), epoch, sample_rate=sr)
+            sr = cfg.audio.sample_rate
+            tag = f"audio_{i}" if i > 0 else "audio"
+            writer.add_audio(f"{tag}/mic", mic_wav[0].cpu(), epoch, sample_rate=sr)
+            writer.add_audio(f"{tag}/enhanced", enh_wav[0].cpu(), epoch, sample_rate=sr)
+            writer.add_audio(f"{tag}/clean", clean_wav[0].cpu(), epoch, sample_rate=sr)
 
-        # Spectrogram comparison
-        fig = plot_spectrogram_comparison(
-            mic_stft, enhanced, clean_stft, sr, cfg.audio.hop_length,
-        )
-        writer.add_figure("spectrograms/comparison", fig, epoch)
-        plt.close(fig)
+            # Spectrogram comparison for each sample
+            fig = plot_spectrogram_comparison(
+                mic_stft, enhanced, clean_stft, sr, cfg.audio.hop_length,
+            )
+            writer.add_figure(f"spectrograms/comparison_{i}", fig, epoch)
+            plt.close(fig)
 
-        # Delay distribution with ground truth
-        if delay_dist is not None:
-            gt_delay = val_batch["delay_samples"][0]
+            # Capture activations/diagnostics from first sample only;
+            # disable capture for remaining samples to avoid overhead
+            if i == 0:
+                diag_delay_dist = delay_dist
+                diag_mic_stft = mic_stft
+                act_capture.disable()
+
+        activation_store = act_capture.store
+
+        # Delay distribution with ground truth (first sample)
+        if diag_delay_dist is not None:
+            gt_delay = diag_batch["delay_samples"][diag_idx]
             fig = plot_delay_with_gt(
-                delay_dist, gt_delay, cfg.audio.hop_length, cfg.model.dmax,
+                diag_delay_dist, gt_delay, cfg.audio.hop_length, cfg.model.dmax,
             )
             writer.add_figure("delay/distribution_with_gt", fig, epoch)
             plt.close(fig)
 
         # CCM mask analysis (dec1 output = 27ch mask, no BN)
-        mask_key = "dec1"
-        if mask_key in activation_store:
-            fig = plot_ccm_mask(activation_store[mask_key], mic_stft)
+        if "dec1" in activation_store:
+            fig = plot_ccm_mask(activation_store["dec1"], diag_mic_stft)
             writer.add_figure("ccm/mask_magnitude", fig, epoch)
             plt.close(fig)
 
@@ -262,7 +286,6 @@ def log_audio_and_spectrograms(writer, model, val_batch, epoch, cfg, device,
             writer.add_figure("activations/statistics", fig, epoch)
             plt.close(fig)
 
-    remove_hooks(hook_handles)
     model.train()
 
 
@@ -307,7 +330,7 @@ def _hub_upload_logs(api, repo_id, log_dir):
         print(f"  Hub log upload failed: {e}")
 
 
-def train(cfg, resume=None, dummy=False):
+def train(cfg, resume=None, dummy=False, overfit_real=False):
     # --- Accelerator setup ---
     accelerator = Accelerator(
         gradient_accumulation_steps=cfg.training.grad_accum_steps,
@@ -322,19 +345,12 @@ def train(cfg, resume=None, dummy=False):
     if is_main:
         print(f"Device: {device}, num_processes: {accelerator.num_processes}")
 
-    # Create directories
-    ckpt_dir = Path(cfg.paths.checkpoint_dir)
-    log_dir = Path(cfg.paths.log_dir)
+    # Create timestamped run directories so each run is separate in TensorBoard
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ckpt_dir = Path(cfg.paths.checkpoint_dir) / run_id
+    log_dir = Path(cfg.paths.log_dir) / run_id
     if is_main:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-        # Clean stale TensorBoard event files from previous runs
-        if not resume:
-            stale = list(log_dir.glob("events.out.tfevents.*"))
-            if stale:
-                print(f"Cleaning {len(stale)} stale event file(s) from {log_dir}")
-                for f in stale:
-                    f.unlink()
 
     writer = SummaryWriter(log_dir) if is_main else None
 
@@ -343,11 +359,12 @@ def train(cfg, resume=None, dummy=False):
     if is_main:
         hub_api, hub_repo_id = _init_hub_api(cfg)
 
-    # Model — compile before prepare()
+    # Model — register hooks before torch.compile so dynamo guards are stable
     raw_model = DeepVQEAEC.from_config(cfg)
     n_params = sum(p.numel() for p in raw_model.parameters())
     if is_main:
         print(f"Parameters: {n_params:,}")
+    act_capture = ActivationCapture(raw_model)
     if device.type == "cuda":
         raw_model = torch.compile(raw_model)
         if is_main:
@@ -364,7 +381,26 @@ def train(cfg, resume=None, dummy=False):
     )
 
     # Dataset
-    if dummy:
+    if overfit_real:
+        target_len = int(cfg.training.clip_length_sec * cfg.audio.sample_rate)
+        train_ds = FixedSynthDataset(
+            clean_dir=cfg.data.clean_dir,
+            noise_dir=cfg.data.noise_dir,
+            farend_dir=cfg.data.farend_dir,
+            rir_dir=cfg.data.rir_dir,
+            delays_ms=cfg.data.overfit_delays_ms,
+            sr=cfg.audio.sample_rate,
+            target_len=target_len,
+            n_fft=cfg.audio.n_fft,
+            hop_length=cfg.audio.hop_length,
+            snr_db=cfg.data.overfit_snr_db,
+            ser_db=cfg.data.overfit_ser_db,
+            repeat=cfg.data.overfit_repeat,
+            max_rir_length_ms=cfg.data.max_rir_length_ms,
+            drr_db=cfg.data.drr_range[0],
+        )
+        val_ds = train_ds  # same examples for overfit
+    elif dummy:
         train_ds = DummyAECDataset(
             length=cfg.data.num_train,
             target_len=int(cfg.training.clip_length_sec * cfg.audio.sample_rate),
@@ -583,14 +619,24 @@ def train(cfg, resume=None, dummy=False):
         val_loss_sum = torch.tensor(0.0, device=device)
         val_n = torch.tensor(0, device=device)
         val_delay_acc_sum = torch.tensor(0.0, device=device)
-        val_erle_sum = torch.tensor(0.0, device=device)
 
         # Per-component sums for rank-0 logging
         val_comp_sums = {k: 0.0 for k in epoch_losses}
-        val_sample_batch = None
+
+        # Per-scenario metrics (computed locally — representative due to shuffled data)
+        scenario_erle = defaultdict(list)
+        scenario_pesq = defaultdict(list)
+        scenario_stoi = defaultdict(list)
+        pesq_count = 0
+        pesq_budget = cfg.eval.pesq_subset
+
+        # Diverse TB samples
+        n_tb_samples = min(cfg.eval.audio_samples, len(val_loader))
+        tb_batch_indices = set(random.sample(range(len(val_loader)), n_tb_samples)) if is_main else set()
+        val_sample_batches = []
 
         with torch.no_grad():
-            for batch in val_loader:
+            for batch_idx, batch in enumerate(val_loader):
                 mic_stft = batch["mic_stft"].to(device, non_blocking=True)
                 ref_stft = batch["ref_stft"].to(device, non_blocking=True)
                 clean_stft = batch["clean_stft"].to(device, non_blocking=True)
@@ -618,33 +664,62 @@ def train(cfg, resume=None, dummy=False):
                     components["mask_reg"] = mask_reg
                     components["total"] = components["total"] + cfg.loss.mask_reg_weight * mask_reg
 
-                # ERLE
+                # Per-sample scenario metrics
                 length = clean_wav.shape[-1]
                 mic_wav = batch["mic_wav"].to(device, non_blocking=True)
                 enh_wav = istft(enhanced, cfg.audio.n_fft, cfg.audio.hop_length, length=length)
-                erle = compute_erle(mic_wav, enh_wav, clean_wav)
+
+                batch_metadata = batch["metadata"]
+                sr = cfg.audio.sample_rate
+                for i in range(mic_wav.shape[0]):
+                    sc = batch_metadata[i]["scenario"]
+                    echo_i = mic_wav[i] - clean_wav[i]
+                    res_i = enh_wav[i] - clean_wav[i]
+                    erle_i = 10 * torch.log10(
+                        (echo_i ** 2).sum() / ((res_i ** 2).sum() + 1e-10)
+                    ).item()
+                    scenario_erle[sc].append(erle_i)
+
+                    if sc == "double_talk" and pesq_count < pesq_budget:
+                        enh_np = enh_wav[i].float().cpu().numpy()
+                        cln_np = clean_wav[i].float().cpu().numpy()
+                        pesq_score = compute_pesq(cln_np, enh_np, sr=sr)
+                        stoi_score = compute_stoi(cln_np, enh_np, sr=sr)
+                        if pesq_score is not None:
+                            scenario_pesq[sc].append(pesq_score)
+                        if stoi_score is not None:
+                            scenario_stoi[sc].append(stoi_score)
+                        pesq_count += 1
 
                 val_loss_sum += components["total"].detach()
                 val_n += 1
                 val_delay_acc_sum += delay_acc.detach()
-                val_erle_sum += erle.detach()
 
                 for k in val_comp_sums:
                     if k in components:
                         val_comp_sums[k] += components[k].item()
 
-                if val_sample_batch is None and is_main:
-                    val_sample_batch = batch
+                if is_main and batch_idx in tb_batch_indices:
+                    bs = batch["mic_stft"].shape[0]
+                    sample_idx = random.randint(0, bs - 1)
+                    val_sample_batches.append((batch, sample_idx))
 
         # Gather validation metrics across all ranks
         val_loss_sum = accelerator.gather(val_loss_sum.unsqueeze(0)).sum()
         val_n_total = accelerator.gather(val_n.unsqueeze(0)).sum()
         val_delay_acc_sum = accelerator.gather(val_delay_acc_sum.unsqueeze(0)).sum()
-        val_erle_sum = accelerator.gather(val_erle_sum.unsqueeze(0)).sum()
 
         avg_val_loss = (val_loss_sum / val_n_total).item()
         avg_val_delay_acc = (val_delay_acc_sum / val_n_total).item()
-        avg_val_erle = (val_erle_sum / val_n_total).item()
+
+        # Gather ERLE across ranks for gate check
+        all_erle_local = [v for vals in scenario_erle.values() for v in vals]
+        local_erle = np.mean(all_erle_local) if all_erle_local else 0.0
+        erle_tensor = torch.tensor(local_erle, device=device)
+        count_tensor = torch.tensor(float(len(all_erle_local)), device=device)
+        erle_weighted = accelerator.gather((erle_tensor * count_tensor).unsqueeze(0)).sum()
+        count_sum = accelerator.gather(count_tensor.unsqueeze(0)).sum()
+        avg_val_erle = (erle_weighted / (count_sum + 1e-10)).item()
 
         # Rank-0 logging and checkpointing
         if is_main:
@@ -653,7 +728,16 @@ def train(cfg, resume=None, dummy=False):
                 val_comp_sums[k] /= n_val_local
                 add_scalar_with_help(writer, f"val/{k}", val_comp_sums[k], epoch)
             add_scalar_with_help(writer, "val/delay_acc", avg_val_delay_acc, epoch)
+
+            # Per-scenario ERLE
+            for sc, values in scenario_erle.items():
+                add_scalar_with_help(writer, f"val/erle_{sc}", np.mean(values), epoch)
             add_scalar_with_help(writer, "val/erle_db", avg_val_erle, epoch)
+            # PESQ/STOI for double-talk
+            for sc, values in scenario_pesq.items():
+                add_scalar_with_help(writer, f"val/pesq_{sc}", np.mean(values), epoch)
+            for sc, values in scenario_stoi.items():
+                add_scalar_with_help(writer, f"val/stoi_{sc}", np.mean(values), epoch)
 
         # Step epoch scheduler (only after warmup) — all ranks
         if warmup_done:
@@ -665,17 +749,28 @@ def train(cfg, resume=None, dummy=False):
             warmup_done = True
 
         if is_main:
-            print(
+            # Build per-scenario metric summary
+            metric_parts = [
                 f"Epoch {epoch+1}: train_loss={epoch_losses['total']:.4f}, "
                 f"val_loss={avg_val_loss:.4f}, "
                 f"delay_acc={avg_val_delay_acc:.1%}, erle={avg_val_erle:+.1f}dB, "
                 f"lr={optimizer.param_groups[0]['lr']:.2e}"
-            )
+            ]
+            for sc, values in scenario_erle.items():
+                part = f"  {sc}: erle={np.mean(values):+.1f}dB (n={len(values)})"
+                if sc in scenario_pesq and scenario_pesq[sc]:
+                    part += f", pesq={np.mean(scenario_pesq[sc]):.2f}"
+                if sc in scenario_stoi and scenario_stoi[sc]:
+                    part += f", stoi={np.mean(scenario_stoi[sc]):.3f}"
+                metric_parts.append(part)
+            print("\n".join(metric_parts))
 
             # Log audio/spectrograms
-            if val_sample_batch:
-                log_audio_and_spectrograms(writer, model, val_sample_batch, epoch, cfg,
-                                           device, accelerator=accelerator)
+            if val_sample_batches:
+                log_audio_and_spectrograms(writer, model, val_sample_batches, epoch, cfg,
+                                           device, accelerator=accelerator,
+                                           act_capture=act_capture)
+                print(f"  Logged {len(val_sample_batches)} audio sample(s) to TensorBoard")
 
             # Checkpointing
             if (epoch + 1) % cfg.training.checkpoint_every == 0:
@@ -754,7 +849,10 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/default.yaml", help="Config file")
     parser.add_argument("--resume", default=None, help="Checkpoint to resume from")
     parser.add_argument("--dummy", action="store_true", help="Use dummy dataset for testing")
+    parser.add_argument("--overfit-real", action="store_true",
+                        help="Use FixedSynthDataset (real audio, controlled delays)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    train(cfg, resume=args.resume, dummy=args.dummy)
+    train(cfg, resume=args.resume, dummy=args.dummy,
+          overfit_real=args.overfit_real)

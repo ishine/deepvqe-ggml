@@ -40,7 +40,7 @@ def plot_spectrogram_comparison(mic_stft, enh_stft, clean_stft, sr, hop_length):
     clean_db = _mag_db(clean_stft)
     res_db = enh_db - clean_db
 
-    vmin = min(mic_db.min(), enh_db.min(), clean_db.min())
+    vmin = max(min(mic_db.min(), enh_db.min(), clean_db.min()), -80.0)
     vmax = max(mic_db.max(), enh_db.max(), clean_db.max())
 
     F, T = mic_db.shape
@@ -53,7 +53,8 @@ def plot_spectrogram_comparison(mic_stft, enh_stft, clean_stft, sr, hop_length):
 
     for ax, title, d in zip(axes.flat, titles, data):
         if title == "Residual (enh - clean)":
-            im = ax.pcolormesh(t_axis, f_axis / 1000, d, cmap="RdBu_r", shading="auto")
+            im = ax.pcolormesh(t_axis, f_axis / 1000, d, vmin=-80, vmax=80,
+                               cmap="RdBu_r", shading="auto")
         else:
             im = ax.pcolormesh(t_axis, f_axis / 1000, d, vmin=vmin, vmax=vmax,
                                cmap="magma", shading="auto")
@@ -273,19 +274,14 @@ def plot_activation_stats(activation_dict):
 # Hook registration
 # ---------------------------------------------------------------------------
 
-def register_hooks(model):
-    """Register forward hooks on key layers to capture activations.
+class ActivationCapture:
+    """Persistent forward-hook manager that avoids torch.compile recompilation.
 
-    Args:
-        model: DeepVQEAEC instance (unwrapped)
-
-    Returns:
-        (activation_store, hook_handles)
+    Register once before torch.compile; enable/disable capture as needed.
+    Because hooks are never added or removed, dynamo guards stay stable.
     """
-    activation_store = {}
-    hook_handles = []
 
-    target_names = [
+    TARGET_NAMES = [
         "fe_mic", "fe_ref",
         "mic_enc1", "mic_enc2", "mic_enc3", "mic_enc4", "mic_enc5",
         "far_enc1", "far_enc2",
@@ -294,30 +290,33 @@ def register_hooks(model):
         "ccm",
     ]
 
-    for name in target_names:
-        module = getattr(model, name, None)
-        if module is None:
-            continue
+    def __init__(self, model):
+        self.store = {}
+        self._enabled = False
 
-        def _make_hook(n):
-            def hook_fn(module, input, output):
-                # AlignBlock returns tuple when return_delay=True
-                if isinstance(output, tuple):
-                    activation_store[n] = output[0].detach().cpu()
-                else:
-                    activation_store[n] = output.detach().cpu()
-            return hook_fn
+        for name in self.TARGET_NAMES:
+            module = getattr(model, name, None)
+            if module is None:
+                continue
 
-        h = module.register_forward_hook(_make_hook(name))
-        hook_handles.append(h)
+            def _make_hook(n):
+                def hook_fn(module, input, output):
+                    if not self._enabled:
+                        return
+                    if isinstance(output, tuple):
+                        self.store[n] = output[0].detach().cpu()
+                    else:
+                        self.store[n] = output.detach().cpu()
+                return hook_fn
 
-    return activation_store, hook_handles
+            module.register_forward_hook(_make_hook(name))
 
+    def enable(self):
+        self.store.clear()
+        self._enabled = True
 
-def remove_hooks(hook_handles):
-    """Remove all registered hooks."""
-    for h in hook_handles:
-        h.remove()
+    def disable(self):
+        self._enabled = False
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +495,7 @@ METRIC_HELP = {
         "general echo delay estimation."
     ),
     "val/erle_db": (
-        "**Echo Return Loss Enhancement** in dB.  \n"
+        "**Echo Return Loss Enhancement** in dB (all scenarios averaged).  \n"
         "ERLE = 10*log10(|mic-clean|^2 / |enhanced-clean|^2).  \n"
         "Measures how much echo+noise power the model removes.  \n\n"
         "**Interpretation:**\n"
@@ -509,6 +508,25 @@ METRIC_HELP = {
         "but ERLE doesn't improve, the model is optimizing the wrong thing.  \n"
         "**Watch for:** ERLE plateau while loss still drops — may indicate "
         "the loss function doesn't correlate well with perceptual quality."
+    ),
+    "val/erle_single_talk_farend": (
+        "**ERLE on far-end single-talk (FEST).** Near-end is silent, "
+        "mic = echo + noise. Measures pure echo cancellation ability. "
+        "Paper reports 65.70 dB on FEST."
+    ),
+    "val/erle_double_talk": (
+        "**ERLE on double-talk.** Both speakers active. Less meaningful than "
+        "PESQ/STOI here since ERLE can't distinguish echo removal from "
+        "near-end speech suppression."
+    ),
+    "val/pesq_double_talk": (
+        "**PESQ on double-talk.** Wideband PESQ (1.0-4.5 scale). "
+        "Measures perceptual speech quality of the enhanced signal. "
+        "Target: >3.0 for good quality."
+    ),
+    "val/stoi_double_talk": (
+        "**STOI on double-talk.** Extended STOI (0-1 scale). "
+        "Measures speech intelligibility. Target: >0.85."
     ),
 
     # -- Per-layer gradient norms --
