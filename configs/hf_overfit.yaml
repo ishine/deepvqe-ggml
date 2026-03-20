@@ -1,0 +1,97 @@
+# HF Jobs overfit test: 4x A100, 10 min budget.
+#
+# Uses FixedSynthDataset (8 real audio examples at different delays).
+# Data downloaded from richiejp/deepvqe-overfit-data HF dataset (<5 MB).
+#
+# Usage:  bash scripts/hf_overfit.sh
+#
+# Expected: loss decreases across epochs, visible in TensorBoard on HF Hub.
+
+model:
+  mic_channels: [2, 64, 128, 128, 128, 128]
+  far_channels: [2, 32, 128]
+  align_hidden: 32
+  dmax: 32
+  align_temp_start: 1.0
+  align_temp_end: 0.1
+  align_temp_epochs: 50
+  power_law_c: 0.3
+
+audio:
+  sample_rate: 16000
+  n_fft: 512
+  hop_length: 256
+  n_freqs: 257
+
+training:
+  batch_size: 64             # per GPU → 64 × 4 = 256 effective, ~46 GB VRAM/GPU with AMP
+  grad_accum_steps: 1        # no accumulation needed at this batch size
+  num_workers: 4
+  lr: 1.0e-3
+  weight_decay: 0.0          # no regularization for overfit test
+  epochs: 20
+  clip_length_sec: 3.0
+  amp: true                  # BF16 for efficiency
+  grad_clip: 5.0
+  warmup_epochs: 0
+  checkpoint_every: 3
+  keep_checkpoints: 5
+  early_stop_patience: 0     # disabled
+  early_stop_min_delta: 0.0
+  delay_acc_min: 0.0         # disable gate
+  erle_min_db: -100.0        # disable gate
+  lr_scheduler: cosine_restarts
+  lr_patience: 10
+  lr_factor: 0.5
+  lr_min: 1.0e-6
+  lr_cosine_t0: 100
+  lr_cosine_tmult: 2
+
+loss:
+  # Pure reconstruction loss — no delay/entropy/energy supervision.
+  plcmse_weight: 0.0
+  mag_l1_weight: 1.0
+  time_l1_weight: 1.0
+  sisdr_weight: 0.0
+  smooth_l1_weight: 0.0
+  smooth_l1_beta: 0.01
+  energy_preservation_weight: 0.0
+  energy_pres_mode: relative
+  delay_weight: 0.0
+  entropy_weight: 0.0
+  mask_reg_weight: 0.0
+  power_law_c: 0.3
+
+data:
+  num_train: 8
+  num_val: 8
+  clean_dir: "/data/overfit/clean"
+  noise_dir: "/data/overfit/noise"
+  rir_dir: "/data/overfit/impulse_responses"
+  farend_dir: ""              # reuse clean_dir
+  snr_range: [5, 40]
+  ser_range: [-10, 10]
+  delay_range: [0, 5120]
+  max_delay_frames: 32
+  single_talk_prob: 0.0       # all double-talk for overfit
+  max_rir_length_ms: 500
+  drr_range: [10, 10]         # fixed DRR for reproducibility
+  # FixedSynthDataset settings (used with --overfit-real)
+  overfit_delays_ms: [0, 40, 80, 120, 160, 200, 240, 300]
+  overfit_snr_db: 20.0
+  overfit_ser_db: 0.0
+  overfit_repeat: 1024         # 8 × 1024 = 8192 per epoch → 32 steps/epoch at effective batch 256
+
+eval:
+  pesq_subset: 8
+  audio_samples: 3
+
+paths:
+  checkpoint_dir: checkpoints/hf_overfit
+  log_dir: logs/hf_overfit
+
+hub:
+  push_to_hub: true
+  hub_model_id: "richiejp/deepvqe-aec-overfit"
+  push_logs_every: 2
+  push_checkpoints: true

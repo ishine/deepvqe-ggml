@@ -18,6 +18,14 @@ datasets_fullband/
 # Caches
 .cache/
 
+# Secrets / tokens
+.env
+.env.*
+*.token
+token
+huggingface_token
+.huggingface/
+
 # IDE / tool
 .claude/
 tb_images
