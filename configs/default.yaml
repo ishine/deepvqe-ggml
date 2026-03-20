@@ -18,25 +18,25 @@ training:
   batch_size: 32
   grad_accum_steps: 2
   num_workers: 12
-  lr: 1.2e-3
+  lr: 3.0e-4
   weight_decay: 5.0e-7
   epochs: 250
   clip_length_sec: 3.0
   amp: true
   grad_clip: 5.0
-  warmup_epochs: 3
+  warmup_epochs: 0
   checkpoint_every: 5
   keep_checkpoints: 5
-  early_stop_patience: 30
+  early_stop_patience: 50
   early_stop_min_delta: 1.0e-4
   delay_acc_min: 0.5
   erle_min_db: 3.0
   lr_scheduler: cosine_restarts
-  lr_patience: 5               # fallback if switched to plateau
+  lr_patience: 10              # fallback if switched to plateau
   lr_factor: 0.5
   lr_min: 1.0e-6
-  lr_cosine_t0: 50
-  lr_cosine_tmult: 2
+  lr_cosine_t0: 200
+  lr_cosine_tmult: 1
 
 loss:
   # Pure reconstruction loss — mag-L1 + time-L1 only.

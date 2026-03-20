@@ -177,7 +177,8 @@ def save_checkpoint(model, optimizer, schedulers, epoch, loss, path):
     )
 
 
-def load_checkpoint(path, model, optimizer=None, schedulers=None):
+def load_checkpoint(path, model, optimizer=None, schedulers=None,
+                    skip_scheduler=False):
     ckpt = torch.load(path, weights_only=False)
     state = ckpt["model_state_dict"]
     # Strip _orig_mod. prefix for backward compat with old checkpoints
@@ -185,7 +186,7 @@ def load_checkpoint(path, model, optimizer=None, schedulers=None):
     _unwrap(model).load_state_dict(state)
     if optimizer and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    if schedulers and "scheduler_states" in ckpt:
+    if schedulers and "scheduler_states" in ckpt and not skip_scheduler:
         for k, s in schedulers.items():
             if k in ckpt["scheduler_states"]:
                 s.load_state_dict(ckpt["scheduler_states"][k])
@@ -285,7 +286,8 @@ def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device,
     model.train()
 
 
-def train(cfg, resume=None, dummy=False, overfit_real=False):
+def train(cfg, resume=None, dummy=False, overfit_real=False,
+          fresh_scheduler=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -408,8 +410,17 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
     start_epoch = 0
     best_val_loss = float("inf")
     if resume:
-        start_epoch = load_checkpoint(resume, model, optimizer, schedulers)
-        print(f"Resumed from epoch {start_epoch}")
+        start_epoch = load_checkpoint(resume, model, optimizer, schedulers,
+                                      skip_scheduler=fresh_scheduler)
+        if fresh_scheduler:
+            print("Fresh scheduler: ignoring saved scheduler state")
+        # Restore best_val_loss from checkpoint so early stopping persists
+        ckpt = torch.load(resume, weights_only=False)
+        if "loss" in ckpt:
+            best_val_loss = ckpt["loss"]
+            print(f"Resumed from epoch {start_epoch}, best_val_loss={best_val_loss:.4f}")
+        else:
+            print(f"Resumed from epoch {start_epoch}")
 
     global_step = start_epoch * steps_per_epoch
     warmup_done = start_epoch >= cfg.training.warmup_epochs
@@ -753,8 +764,11 @@ if __name__ == "__main__":
     parser.add_argument("--dummy", action="store_true", help="Use dummy dataset for testing")
     parser.add_argument("--overfit-real", action="store_true",
                         help="Use FixedSynthDataset (real audio, controlled delays)")
+    parser.add_argument("--fresh-scheduler", action="store_true",
+                        help="Ignore saved scheduler state on resume (use when changing LR schedule)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     train(cfg, resume=args.resume, dummy=args.dummy,
-          overfit_real=args.overfit_real)
+          overfit_real=args.overfit_real,
+          fresh_scheduler=args.fresh_scheduler)
