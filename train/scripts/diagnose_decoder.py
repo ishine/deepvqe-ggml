@@ -25,15 +25,15 @@ from src.losses import mask_mag_from_raw
 from data.dataset import DummyAECDataset
 
 
-def find_checkpoint(ckpt_dir="checkpoints/overfit"):
-    """Auto-detect checkpoint: best.pt → latest epoch_*.pt → checkpoints/best.pt."""
+def find_checkpoint(ckpt_dir="../checkpoints/overfit"):
+    """Auto-detect checkpoint: best.pt -> latest epoch_*.pt -> checkpoints/best.pt."""
     best = os.path.join(ckpt_dir, "best.pt")
     if os.path.exists(best):
         return best
     epoch_files = sorted(glob.glob(os.path.join(ckpt_dir, "epoch_*.pt")))
     if epoch_files:
         return epoch_files[-1]
-    fallback = "checkpoints/best.pt"
+    fallback = "../checkpoints/best.pt"
     if os.path.exists(fallback):
         return fallback
     return None

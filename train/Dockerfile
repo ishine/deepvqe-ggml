@@ -12,5 +12,5 @@ RUN pip install --no-cache-dir einops pesq pystoi soundfile gguf
 WORKDIR /workspace/deepvqe
 
 # Source code is mounted at runtime; only the entrypoint is baked in
-COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY train/scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["entrypoint.sh"]

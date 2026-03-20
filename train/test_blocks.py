@@ -22,7 +22,7 @@ from src.blocks import (
 )
 from src.ccm import CCM
 from src.model import DeepVQEAEC
-from train import delay_samples_to_frame
+from utils import delay_samples_to_frame
 
 
 # ── 1. FE ────────────────────────────────────────────────────────────────────

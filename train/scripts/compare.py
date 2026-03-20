@@ -3,21 +3,13 @@
 Registers forward hooks on all PyTorch layers to capture intermediate
 activations, then compares against GGML binary dumps.
 
-Usage:
-    # 1a. Generate PyTorch intermediates (random input)
-    python ggml/compare.py --mode pytorch --checkpoint best.pt --output intermediates/
+Usage (from project root, via Makefile):
+    make compare-pt          # Export PyTorch intermediates
+    make compare-block       # Export single block I/O
 
-    # 1b. Generate PyTorch intermediates (real audio input)
-    python ggml/compare.py --mode pytorch --checkpoint best.pt --use-audio --output intermediates/
-
-    # 1c. Export single block input/output for isolated C++ verification
-    python ggml/compare.py --mode block --checkpoint best.pt --block mic_enc1 --output intermediates/blocks/
-
-    # 2. Run GGML inference with dumps
-    ./ggml/deepvqe model.gguf --dump-intermediates
-
-    # 3. Compare
-    python ggml/compare.py --mode compare --pytorch-dir intermediates/ --ggml-dir ggml_intermediates/
+Or directly inside Docker (from train/ working dir):
+    python scripts/compare.py --mode pytorch --checkpoint ../checkpoints/best.pt --output ../intermediates/pytorch
+    python scripts/compare.py --mode block --checkpoint ../checkpoints/best.pt --block mic_enc1 --output ../intermediates/blocks
 """
 
 import argparse
@@ -28,13 +20,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# Ensure project root is on the path when running from ggml/ subdir
+# Ensure train/ is on the path when running from scripts/ subdir
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import load_config
 from src.model import DeepVQEAEC
 from src.stft import istft
-from train import load_checkpoint
+from utils import load_checkpoint
 
 
 def capture_intermediates(model, mic_stft, ref_stft):
@@ -287,11 +279,11 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["pytorch", "block", "compare"], required=True)
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--checkpoint", default=None, help="Checkpoint (for pytorch/block modes)")
-    parser.add_argument("--output", default="intermediates/pytorch",
+    parser.add_argument("--output", default="../intermediates/pytorch",
                         help="Output dir (for pytorch/block modes)")
-    parser.add_argument("--pytorch-dir", default="intermediates/pytorch",
+    parser.add_argument("--pytorch-dir", default="../intermediates/pytorch",
                         help="PyTorch intermediates dir (for compare mode)")
-    parser.add_argument("--ggml-dir", default="intermediates/ggml",
+    parser.add_argument("--ggml-dir", default="../intermediates/ggml",
                         help="GGML intermediates dir (for compare mode)")
     parser.add_argument("--use-audio", action="store_true",
                         help="Use real audio from AECDataset instead of random noise")

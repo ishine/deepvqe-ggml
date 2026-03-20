@@ -23,7 +23,7 @@ from src.config import load_config
 from src.metrics import evaluate_sample
 from src.model import DeepVQEAEC
 from src.stft import istft
-from train import collate_fn, load_checkpoint
+from utils import collate_fn, load_checkpoint
 
 
 def plot_spectrograms(mic_wav, enh_wav, clean_wav, sr, title="", save_path=None):
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/default.yaml", help="Config file")
     parser.add_argument("--checkpoint", required=True, help="Checkpoint path")
     parser.add_argument("--dummy", action="store_true", help="Use dummy dataset")
-    parser.add_argument("--output-dir", default="eval_output", help="Output directory")
+    parser.add_argument("--output-dir", default="../eval_output", help="Output directory")
     parser.add_argument("--max-samples", type=int, default=None, help="Max samples to evaluate")
     args = parser.parse_args()
 

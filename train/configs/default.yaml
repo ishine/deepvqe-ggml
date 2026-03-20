@@ -73,5 +73,5 @@ eval:
   audio_samples: 10
 
 paths:
-  checkpoint_dir: checkpoints/train
-  log_dir: logs/train
+  checkpoint_dir: ../checkpoints/train
+  log_dir: ../logs/train

@@ -9,17 +9,18 @@
 #   ./scripts/docker-run.sh --docker-args "-it" bash    # interactive shell
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TRAIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_ROOT="$(cd "$TRAIN_DIR/.." && pwd)"
 
 IMAGE="${DEEPVQE_IMAGE:-deepvqe}"
 CONTAINER="${DEEPVQE_CONTAINER:-deepvqe-run}"
 GPU="${DEEPVQE_GPU:-all}"
 
-DATA_DIR="${DEEPVQE_DATA_DIR:-$SCRIPT_DIR/datasets_fullband}"
-CKPT_DIR="${DEEPVQE_CKPT_DIR:-$SCRIPT_DIR/checkpoints}"
-LOG_DIR="${DEEPVQE_LOG_DIR:-$SCRIPT_DIR/logs}"
-EVAL_DIR="${DEEPVQE_EVAL_DIR:-$SCRIPT_DIR/eval_output}"
-CACHE_DIR="${DEEPVQE_CACHE_DIR:-$SCRIPT_DIR/.cache/torch_inductor}"
+DATA_DIR="${DEEPVQE_DATA_DIR:-$PROJECT_ROOT/datasets_fullband}"
+CKPT_DIR="${DEEPVQE_CKPT_DIR:-$PROJECT_ROOT/checkpoints}"
+LOG_DIR="${DEEPVQE_LOG_DIR:-$PROJECT_ROOT/logs}"
+EVAL_DIR="${DEEPVQE_EVAL_DIR:-$PROJECT_ROOT/eval_output}"
+CACHE_DIR="${DEEPVQE_CACHE_DIR:-$PROJECT_ROOT/.cache/torch_inductor}"
 
 DOCKER_ARGS=(
     --rm
@@ -29,12 +30,13 @@ DOCKER_ARGS=(
     --device /dev/fuse --cap-add SYS_ADMIN
     -e TORCHINDUCTOR_FX_GRAPH_CACHE=1
     -e TORCHINDUCTOR_CACHE_DIR=/cache/torch_inductor
-    -v "$SCRIPT_DIR:/workspace/deepvqe"
+    -v "$PROJECT_ROOT:/workspace/deepvqe"
     -v "$DATA_DIR:/workspace/deepvqe/datasets_fullband"
     -v "$CKPT_DIR:/workspace/deepvqe/checkpoints"
     -v "$LOG_DIR:/workspace/deepvqe/logs"
     -v "$EVAL_DIR:/workspace/deepvqe/eval_output"
     -v "$CACHE_DIR:/cache/torch_inductor"
+    -w /workspace/deepvqe/train
 )
 
 # Pull out --docker-args flags (extra args passed to docker run).
@@ -55,11 +57,11 @@ done
 
 # If stdin is not a terminal and no arguments given, read stdin as a Python script.
 if [ $# -eq 0 ] && [ ! -t 0 ]; then
-    TMPSCRIPT="$(mktemp "$SCRIPT_DIR/.tmp_docker_run_XXXXXX.py")"
+    TMPSCRIPT="$(mktemp "$TRAIN_DIR/.tmp_docker_run_XXXXXX.py")"
     trap 'rm -f "$TMPSCRIPT"' EXIT
     cat > "$TMPSCRIPT"
     exec docker run "${DOCKER_ARGS[@]}" "${EXTRA_DOCKER_ARGS[@]}" \
-        "$IMAGE" python "/workspace/deepvqe/$(basename "$TMPSCRIPT")"
+        "$IMAGE" python "/workspace/deepvqe/train/$(basename "$TMPSCRIPT")"
 fi
 
 if [ $# -eq 0 ]; then

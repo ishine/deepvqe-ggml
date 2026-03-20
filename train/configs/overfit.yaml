@@ -83,5 +83,5 @@ data:
   overfit_repeat: 32          # 8 examples × 32 = 256 per epoch → 32 batches
 
 paths:
-  checkpoint_dir: checkpoints/overfit
-  log_dir: logs/overfit
+  checkpoint_dir: ../checkpoints/overfit
+  log_dir: ../logs/overfit

@@ -381,7 +381,7 @@ def main():
         description="Comprehensive TensorBoard training report",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--log-dir", default="logs", help="TensorBoard log directory")
+    parser.add_argument("--log-dir", default="../logs", help="TensorBoard log directory")
     sub = parser.add_subparsers(dest="command")
 
     # summary

@@ -3,6 +3,7 @@ datasets_fullband/
 checkpoints/
 logs/
 eval_output/
+intermediates/
 *.pt
 *.bin
 *.gguf
@@ -22,10 +23,15 @@ __pycache__/
 *.egg-info/
 uv.lock
 
+# GGML C++ (not needed in Docker)
+ggml/
+
 # Docs
 README.md
-paper.pdf
+CLAUDE.md
 
 # Nix
 flake.nix
 flake.lock
+.direnv/
+.envrc

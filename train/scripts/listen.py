@@ -20,7 +20,7 @@ from src.config import load_config
 from src.metrics import evaluate_sample
 from src.model import DeepVQEAEC
 from src.stft import istft
-from train import load_checkpoint
+from utils import load_checkpoint
 
 
 def run(cfg, checkpoint_path, output_dir, dummy=False, num_samples=5, sample_idx=None):
@@ -102,7 +102,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate listenable WAV audio from checkpoint")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--output-dir", default="eval_output/audio")
+    parser.add_argument("--output-dir", default="../eval_output/audio")
     parser.add_argument("--dummy", action="store_true", help="Use DummyAECDataset")
     parser.add_argument("--num-samples", type=int, default=5)
     parser.add_argument("--sample", type=int, default=None, help="Specific sample index")

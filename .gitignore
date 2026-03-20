@@ -22,6 +22,9 @@ datasets_fullband/
 ggml/build/
 intermediates/
 
+# Papers (link to arxiv instead)
+paper.pdf
+
 # IDE / tool
 .claude/
 tb_images

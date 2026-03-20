@@ -18,7 +18,7 @@ import gguf
 
 from src.config import load_config
 from src.model import DeepVQEAEC
-from train import load_checkpoint
+from utils import load_checkpoint
 
 
 class _ChannelAffine(nn.Module):

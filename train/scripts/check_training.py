@@ -11,7 +11,7 @@ from tb_utils import load_logs, get_latest, get_history
 
 def main():
     parser = argparse.ArgumentParser(description="Check training progress")
-    parser.add_argument("--log-dir", default="logs", help="TensorBoard log directory")
+    parser.add_argument("--log-dir", default="../logs", help="TensorBoard log directory")
     parser.add_argument("-n", type=int, default=15, help="Number of recent epochs to show")
     parser.add_argument("--all", action="store_true", help="Show all available tags")
     args = parser.parse_args()

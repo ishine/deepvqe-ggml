@@ -10,7 +10,7 @@ from src.config import load_config
 from src.model import DeepVQEAEC
 from src.stft import stft, istft
 from data.synth import _load_audio
-from train import load_checkpoint
+from utils import load_checkpoint
 
 
 def main():

@@ -1,80 +1,65 @@
-# DeepVQE — AEC with Soft Delay Estimation
+# DeepVQE-GGML
 
-Training, evaluation, and GGML inference implementation of DeepVQE
-(Indenbom et al., Interspeech 2023) for joint acoustic echo cancellation,
-noise suppression, and dereverberation.
+C/C++ inference engine for [DeepVQE](https://arxiv.org/abs/2306.03177)
+(Indenbom et al., Interspeech 2023) — real-time acoustic echo cancellation
+with soft delay estimation, built on [GGML](https://github.com/ggerganov/ggml).
 
-**Paper**: [DeepVQE: Real Time Deep Voice Quality Enhancement](https://arxiv.org/abs/2306.03177)
+## Building
 
-**Focus**: AEC with soft delay estimation for cases with significant echo lag.
-
-## Status
-
-Phases 0-4 complete, Phase 5 (GGML) has export + block-by-block C++ verification.
-Model verified (7.97M params, causality OK, all gradients flow, AMP works).
-Data pipeline verified with DNS5 real data (157K clean, 64K noise, 60K RIR files).
-All training data packed into a single squashfs image (dns5.sqsh), mounted via
-Docker entrypoint.
-Evaluation script produces ERLE/PESQ/STOI/segSNR metrics, spectrograms,
-delay heatmaps, and WAV audio files. GGUF export with BN folding verified
-(max error 1.26e-6). All 6 C++ block tests pass (max error < 6e-6):
-FE, EncoderBlock, Bottleneck (GRU+Linear), DecoderBlock (SubpixelConv2d),
-CCM, AlignBlock.
-
-Uses Docker for training (`make build && make train-minimal`).
-Uses nix flake for C++ build (`nix develop` provides cmake + gcc).
-
-## Running Python Code
-
-All Python code must run inside the Docker container (it has PyTorch, CUDA,
-and all dependencies). Never run Python directly on the host.
+Requires cmake and a C/C++17 compiler. A [Nix](https://nixos.org/) flake is
+provided for reproducible builds:
 
 ```bash
-# Build the image first (most make targets do this automatically)
-make build
+# Enter dev shell (provides cmake, gcc, pkg-config)
+nix develop
 
-# Run arbitrary commands via scripts/docker-run.sh:
-./scripts/docker-run.sh python -c 'import torch; print(torch.cuda.is_available())'
-./scripts/docker-run.sh python scripts/check_training.py
+# Build the CLI inference binary
+make build-ggml
 
-# Pipe a script via stdin:
-echo "import torch; print(torch.cuda.get_device_name())" | ./scripts/docker-run.sh
-
-# Redirect a whole file as a Python script:
-./scripts/docker-run.sh < my_script.py
-
-# Multi-statement commands via bash -c:
-./scripts/docker-run.sh bash -c 'echo $HOSTNAME && python -c "import torch; print(torch.cuda.is_available())"'
-
-# Interactive shell:
-./scripts/docker-run.sh --docker-args "-it" bash
-
-# The `make run` target also uses docker-run.sh:
-make run CMD="python -c 'import torch; print(torch.cuda.is_available())'"
-
-# Existing convenience targets:
-make test              # Smoke test (dummy data, 2 epochs)
-make overfit           # Overfit test (8 tonal examples, FP32, 500 epochs)
-make train-minimal     # Train on DNS5 minimal subset
-make test-model        # Run model unit tests
-make test-blocks       # Run block-level verification tests
-make check             # Check training progress
+# Or build the shared library (libdeepvqe.so) for embedding
+make build-shared
 ```
 
-`scripts/docker-run.sh` sets up all the standard Docker mounts (project,
-checkpoints, logs, datasets, eval output, torch inductor cache) and GPU
-access. It can be configured via environment variables:
+Without Nix:
 
-| Variable | Default | Description |
-|---|---|---|
-| `DEEPVQE_IMAGE` | `deepvqe` | Docker image name |
-| `DEEPVQE_GPU` | `all` | GPU device(s) |
-| `DEEPVQE_DATA_DIR` | `./datasets_fullband` | Host data directory |
-| `DEEPVQE_CKPT_DIR` | `./checkpoints` | Host checkpoint directory |
-| `DEEPVQE_LOG_DIR` | `./logs` | Host log directory |
-| `DEEPVQE_EVAL_DIR` | `./eval_output` | Host eval output directory |
+```bash
+cd ggml
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
 
-All file paths inside the container are relative to `/workspace/deepvqe`.
+## Usage
+
+### CLI
+
+```bash
+# Run inference on numpy STFT arrays (mic + far-end reference)
+ggml/build/deepvqe model.gguf --input-npy mic.npy ref.npy
+
+# Dump intermediate activations for debugging
+ggml/build/deepvqe model.gguf --input-npy mic.npy ref.npy --dump-intermediates
+```
+
+### Shared Library (C API)
+
+Build with `-DDEEPVQE_BUILD_SHARED=ON` to get `libdeepvqe.so` with a C API
+defined in `ggml/deepvqe_api.h`. This can be loaded via `dlopen`, Go's
+`purego`, or any FFI.
+
+See `ggml/example_purego_test.go` for a Go integration example.
+
+### Block Verification
+
+Verify C++ blocks against PyTorch reference outputs:
+
+```bash
+# First, export PyTorch intermediates (requires Docker, see train/)
+make compare-pt
+make compare-block
+
+# Then run C++ block tests
+make test-ggml
+```
 
 ## Architecture
 
@@ -82,307 +67,51 @@ All file paths inside the container are relative to `/workspace/deepvqe`.
 |-----------|---------|
 | Sample rate | 16 kHz |
 | STFT | 512 FFT, 256 hop, sqrt-Hann window, 257 freq bins |
-| Mic encoder | 5 blocks: 2→64→128→128→128→128 channels |
-| Far-end encoder | 2 blocks: 2→32→128 channels |
-| AlignBlock | Cross-attention soft delay, dmax=32 (320ms), h=32 similarity channels |
-| Encoder block 3 | 256→128 (concatenated mic + aligned far-end) |
-| Bottleneck | GRU(1152→576) + Linear(576→1152) |
-| Decoder | 5 blocks with sub-pixel conv + BN: 128→128→128→64→64 |
-| Mask head | 1x1 Conv2d(64→27), no BN — preserves spatial contrast for mask estimation |
-| CCM | 27ch → 3×3 complex convolving mask (real-valued arithmetic) |
-| Parameters | ~8.0M (full model) |
+| Mic encoder | 5 blocks: 2->64->128->128->128->128 channels |
+| Far-end encoder | 2 blocks: 2->32->128 channels |
+| AlignBlock | Cross-attention soft delay, dmax=32 (320ms) |
+| Bottleneck | GRU(1152->576) + Linear(576->1152) |
+| Decoder | 5 blocks with sub-pixel conv |
+| CCM | 27ch -> 3x3 complex convolving mask |
+| Parameters | ~8.0M |
 
-## Hardware
+## Model Weights
 
-- Training: RTX 5070 16GB, ~2GB VRAM estimated for B=8 dmax=32 T=188 with AMP
-- Datasets: ICASSP 2022 AEC + DNS challenge data
+Model weights are stored in GGUF format. To train your own model and export
+weights, see [train/](train/).
 
-## Project Structure
+## Training
 
-```
-deepvqe/
-  configs/default.yaml          # Training configuration
-  src/
-    model.py                    # DeepVQEAEC (full model)
-    blocks.py                   # FE, ResidualBlock, EncoderBlock, etc.
-    align.py                    # AlignBlock (soft delay estimation)
-    ccm.py                      # Complex convolving mask (real-valued)
-    losses.py                   # Loss functions
-    metrics.py                  # ERLE, PESQ, STOI
-    stft.py                     # STFT/iSTFT helpers
-    viz.py                      # Visualization helpers (spectrograms, delays, activations)
-  data/
-    dataset.py                  # AECDataset class
-    synth.py                    # Online audio synthesis
-  scripts/
-    entrypoint.sh               # Docker entrypoint (mounts .sqsh datasets)
-    download_dns5_minimal.sh    # Download DNS5 subset
-  notebooks/
-    explore_training.ipynb      # Interactive pipeline exploration notebook
-  train.py                      # Training script
-  eval.py                       # Evaluation script
-  test_model.py                 # Model verification tests
-  test_data.py                  # Data pipeline verification
-  export_ggml.py                # Weight export with BN folding
-  Makefile                      # Build, train, eval targets
-  Dockerfile                    # NGC PyTorch + squashfuse
-  reference/
-    deepvqe_xr.py               # Xiaobin-Rong NS-only impl (real-valued CCM)
-    deepvqe_xr_v1.py            # Xiaobin-Rong NS-only impl (complex CCM)
-  ggml/
-    CMakeLists.txt              # CMake build (uses ggml submodule)
-    common.h / common.cpp       # .npy I/O, comparison utilities
-    deepvqe.cpp                 # C++ GGML inference (GGUF loading + model struct)
-    compare.py                  # Layer-by-layer comparison (real audio + block export)
-    test_fe.cpp                 # FE block test
-    test_encoder.cpp            # EncoderBlock test
-    test_bottleneck.cpp         # Bottleneck (GRU+Linear) test
-    test_decoder.cpp            # DecoderBlock test
-    test_ccm.cpp                # CCM test
-    test_align.cpp              # AlignBlock test
-    vendor/ggml/                # ggml library (git submodule)
-  pyproject.toml                # uv project config
-```
-
-## Implementation Checklist
-
-### Phase 0: Project Setup
-- [x] Directory structure created
-- [x] YAML config system with dataclass validation
-- [x] pyproject.toml with uv dependency management
-- [x] Config loads and prints correctly
-
-### Phase 1: Model Implementation
-- [x] `src/blocks.py` — FE, ResidualBlock, EncoderBlock, Bottleneck, SubpixelConv2d, DecoderBlock
-- [x] `src/ccm.py` — Real-valued CCM (GGML-friendly, no torch.complex)
-- [x] `src/align.py` — AlignBlock with reshape bug fix and return_delay option
-- [x] `src/model.py` — DeepVQEAEC with far-end branch and alignment
-- [x] `test_model.py` — Verification script (7/7 tests pass)
-- [x] Forward pass produces correct shape (B,257,T,2)
-- [x] Parameter count: 7,975,063
-- [x] Causality verified (future frames don't affect past)
-- [x] All 116 parameters receive non-zero gradients
-- [x] AlignBlock delay distribution sums to 1.0
-- [x] Works with AMP (bfloat16 on CPU, float16 on CUDA)
-- [x] Peak memory: B=1 T=188 runs on CPU
-
-### Phase 2: Data Pipeline
-- [x] `src/stft.py` — STFT/iSTFT with round-trip error 7.15e-7
-- [x] `data/synth.py` — Online synthesis with anti-aliased resampling (scipy resample_poly)
-- [x] `data/dataset.py` — AECDataset + DummyAECDataset, squashfuse-compatible
-- [x] `test_data.py` — Verification script (5/5 tests pass)
-- [x] Shapes correct (B,257,T,2)
-- [x] Cross-correlation peak matches specified delay exactly
-- [x] DNS5 data: 157K clean, 64K noise, 60K RIR (48kHz → 16kHz resampled)
-- [ ] SER matches within 1 dB
-- [ ] Spectrograms visualized for random examples
-- [ ] Delay distribution uniform (not concentrated near zero)
-
-### Phase 3: Training
-- [x] `src/losses.py` — Power-law compressed MSE + magnitude L1 + time-domain L1
-- [x] `train.py` — AdamW, AMP, gradient accumulation, cosine warmup
-- [x] Per-step logging: loss, lr, grad norm
-- [x] Per-epoch eval: validation loss, audio samples, delay heatmaps
-- [x] Checkpointing (last 5 + best)
-- [x] Loss decreases over first 3 epochs (CPU dummy: 4.01→2.28→1.36)
-- [x] No NaN/Inf
-- [x] Checkpoint save/load round-trip verified
-- [ ] GPU memory < 14GB throughout (needs GPU test)
-
-### Phase 4: Evaluation
-- [x] `src/metrics.py` — ERLE, PESQ, STOI, segmental SNR
-- [x] `eval.py` — Full evaluation with visualizations
-- [x] Spectrogram comparisons (mic vs enhanced vs clean)
-- [x] Delay distribution heatmaps
-- [ ] ERLE > 10 dB at epoch 50+ (needs trained model)
-- [ ] ERLE > 20 dB single-talk at epoch 200+
-- [ ] PESQ > 3.0 double-talk at epoch 200+
-- [ ] Add differentiable STOI proxy loss (e.g. torch-stoi or correlation-based approx)
-- [ ] Add PESQ proxy loss (e.g. PESQ-Net or perceptual weighting)
-
-### Phase 5: GGML Conversion
-- [x] `export_ggml.py` — BN folding + GGUF export via gguf package
-- [x] `ggml/deepvqe.cpp` — GGUF loading + model struct + helper functions
-- [x] `ggml/compare.py` — Layer-by-layer comparison with real audio + block-level export
-- [x] `ggml/common.{h,cpp}` — .npy I/O, comparison utilities
-- [x] `ggml/CMakeLists.txt` — CMake build with ggml submodule (static linking)
-- [x] BN folding verified (max error 1.26e-6)
-- [x] Block-by-block C++ verification (all < 6e-6 max error):
-  - [x] `test_fe` — FE power-law (max 2.38e-7)
-  - [x] `test_encoder` — EncoderBlock: Conv2d + ELU + ResidualBlock (max 5.72e-6)
-  - [x] `test_bottleneck` — GRU + Linear (max 3.81e-6 over 188 steps)
-  - [x] `test_decoder` — DecoderBlock: skip + SubpixelConv2d + ChannelAffine (max 4.05e-6)
-  - [x] `test_ccm` — CCM: 3x3 complex convolving mask (max 1.19e-7)
-  - [x] `test_align` — AlignBlock: cross-attention soft delay (max 5.25e-6)
-- [x] `scripts/listen.py` — WAV audio export (mic/enhanced/clean)
-- [x] Full C++ GGML forward pass (all blocks composed in deepvqe.cpp)
-- [x] End-to-end max error 8.58e-6 (target < 1e-3), all 17 layers OK
-- [ ] Runs faster than real-time
-- [ ] PTQ q8_0: PESQ drop < 0.2
-
-## Data Setup
+All training code lives in [`train/`](train/). It uses Docker with an NVIDIA
+NGC PyTorch container. Quick start:
 
 ```bash
-# Download DNS5 minimal subset (~25GB download, ~50GB unpacked)
-./scripts/download_dns5_minimal.sh datasets_fullband
+# Build Docker image and run smoke test
+make -C train build
+make -C train test
 
-# Pack all training data into a single squashfs image.
-# Create a staging directory with hardlinks (no extra disk space):
-mkdir -p datasets_fullband/_dns5_staging
-cp -rl datasets_fullband/clean_fullband datasets_fullband/_dns5_staging/clean
-cp -rl datasets_fullband/datasets_fullband/noise_fullband datasets_fullband/_dns5_staging/noise
-cp -rl datasets_fullband/datasets_fullband/impulse_responses datasets_fullband/_dns5_staging/impulse_responses
+# Train on DNS5 data
+make -C train train-minimal
 
-mksquashfs datasets_fullband/_dns5_staging datasets_fullband/sqsh/dns5.sqsh \
-    -comp zstd -Xcompression-level 3
-rm -rf datasets_fullband/_dns5_staging
-
-# The Docker entrypoint auto-mounts .sqsh files to /data/<name>.
-# dns5.sqsh → /data/dns5/{clean,noise,impulse_responses}
+# Export trained checkpoint to GGUF
+make -C train export
 ```
 
-## Paper Reference Results
+See [`train/Makefile`](train/Makefile) for all available targets.
 
-From [Indenbom et al., Interspeech 2023](https://arxiv.org/abs/2306.03177):
+## Dataset Attribution
 
-| Metric | LD-M | LD-H | AEC-FEST | AEC-DT |
-|--------|------|------|----------|--------|
-| ERLE (dB) | 61.22 | 55.51 | 65.70 | — |
+Model weights are trained on data from the
+[ICASSP 2023 Deep Noise Suppression Challenge](https://github.com/microsoft/DNS-Challenge)
+(Microsoft, CC BY 4.0).
 
-Paper hyperparameters (loss function not disclosed):
+## License
 
-| Parameter | Paper | Ours |
-|-----------|-------|------|
-| Optimizer | AdamW | AdamW |
-| Learning rate | 1.2e-3 | 1.2e-3 |
-| Weight decay | 5e-7 | 5e-7 |
-| Batch size | 400 | 64 (32×2 accum) |
-| Epochs | 250 | 250 |
-| Parameters | 7.5M | 7.97M |
-| dmax (max delay frames) | 100 (~1s) | 32 (~0.5s) |
-
-Notes:
-- Paper ERLE 65.70 dB is on far-end single-talk (FEST) — easiest scenario, no near-end speech.
-- LD-M / LD-H are low-delay medium/high difficulty test sets.
-- DSP-aligned baseline achieved 41.76 / 33.18 / 54.12 dB on the same sets.
-- Paper's batch size is ~6x ours — significantly more gradient steps per epoch.
-- Paper does not disclose loss function components or weights.
-
-## Training Details
-
-| Parameter | Value |
-|-----------|-------|
-| Optimizer | AdamW |
-| Learning rate | 1.2e-3 |
-| Weight decay | 5e-7 |
-| Batch size (physical) | 32 |
-| Gradient accumulation | 2 (effective batch 64) |
-| Epochs | 250 |
-| Clip length | 3.0 seconds (~188 frames) |
-| Mixed precision | Yes (AMP) |
-| Gradient clipping | 5.0 |
-| Scheduler | ReduceLROnPlateau (patience=3, factor=0.5) |
-
-## Loss Function
-
-Multi-component (paper does not disclose, this is our design):
-1. **Power-law compressed MSE** (weight=1.0): Compress pred/target STFT with c=0.3, MSE
-2. **Magnitude L1** (weight=0.5): Direct magnitude accuracy
-3. **Time-domain L1** (weight=0.5): Waveform reconstruction
-4. **Delay cross-entropy** (weight=1.0): Supervises AlignBlock attention with ground truth delay
-5. **Entropy regularization** (weight=0.01): Sharpens attention distribution
-
-Hard training gates (after epoch 20): delay accuracy ≥ 70%, ERLE ≥ 3 dB.
-
-## Visualization & Debugging
-
-`src/viz.py` provides helpers used during training and interactive exploration:
-
-- **Spectrogram comparison** — mic vs enhanced vs clean spectrograms
-- **Delay distribution** — AlignBlock attention heatmaps with ground-truth overlay
-- **CCM mask decomposition** — visualize the 3×3 complex convolving mask channels
-- **Encoder activations** — per-block activation heatmaps and statistics
-- **TensorBoard integration** — weight histograms, per-layer gradient norms, loss ratios
-
-`notebooks/explore_training.ipynb` walks through the full pipeline interactively
-(STFT, encoder, AlignBlock, bottleneck, decoder, CCM, loss). Works with
-`DummyAECDataset` (no data needed) or a trained checkpoint.
-
-## Training Findings
-
-### Decoder BatchNorm Collapse
-
-The original DeepVQE architecture (and both reference implementations) applies double
-BN+ELU in each non-last decoder block: once inside the ResidualBlock, once after the
-SubpixelConv2d upsampling. With 4 non-last blocks, this creates 9 sequential BN layers
-across the decoder chain.
-
-**Diagnosis**: Decoder activation std collapses from 0.83 (dec5) to 0.21 (dec1),
-producing near-uniform CCM masks that lack the frequency-selective spatial contrast
-needed for echo cancellation. The model either uniformly suppresses everything
-(|H|=0.19, ERLE=8.3 dB) or uniformly passes through (|H|=0.90, ERLE=7.3 dB),
-depending on loss configuration. Neither is correct — the mask needs |H|~1 at clean
-bins and |H|~0 at echo bins.
-
-**Root cause**: BN normalizes per-channel across all T-F positions, systematically
-destroying frequency-dependent spatial variation. The SubpixelConv2d creates spatial
-contrast via pixel shuffle, then the outer BN immediately re-normalizes it away. This
-is a known anti-pattern — ESRGAN (Wang et al., 2018) explicitly removed all BN from
-their pixel-shuffle decoder for the same reason.
-
-**Approaches tried**:
-- Removing BN entirely: activation explosion (std 87 at dec3, ELU saturation)
-- Weight normalization on SubpixelConv2d: still explodes, just slower
-- GroupNorm: breaks causality (computes stats across future frames)
-
-**Fix**: Added a separate BN-free mask estimation head (`mask_head = Conv2d(64, 27, 1)`)
-after the decoder. The decoder keeps BN for stability (all 5 blocks are uniform with
-BN+ELU), and the mask head is a simple 1x1 conv with no normalization. This decouples
-feature extraction (stable, BN-normalized) from mask estimation (BN-free, preserving
-spatial contrast). Identity init: mask_head.bias[7] = 1.0, small random weights.
-Pattern from DCCRN and Conv-TasNet which use separate bounded mask heads.
-
-### CCM 27-Channel Gradient Imbalance
-
-The CCM's 27 channels encode 3 basis groups × 9 kernel taps. For echo cancellation
-(where the ideal mask is a per-bin complex gain), only 1 out of 27 channels
-(basis group 0, center tap) should be nonzero (~1.0). The other 26 channels are
-pushed toward zero by the loss gradient. This 26:1 imbalance biases the decoder's
-shared weights toward producing small values overall.
-
-### Energy Preservation Loss
-
-Added asymmetric energy preservation loss with two modes:
-- **absolute**: `mean(relu(|target| - |pred|))` — penalizes absolute magnitude deficit
-- **relative**: `mean(relu((|target| - |pred|) / (|target| + eps)))` — penalizes fractional
-  attenuation, so uniform 10% cut gives penalty 0.1 regardless of bin energy
-
-The relative mode prevents the model from hiding in "uniform mild attenuation" where
-the absolute penalty stays small because loud bins dominate the mean.
-
-### Diagnostic Tools
-
-- `make diagnose` — Per-block weight norms, activation stats, skip vs main path
-  magnitudes, BN running stats, SubpixelConv2d even/odd analysis, CCM mask decomposition
-- `make report` — TensorBoard log analysis with subcommands: summary, scalars, loss
-  dynamics (plateau detection, LR restart detection), gradient analysis, CSV/JSON export
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 ## References
 
-- [DeepVQE paper](https://arxiv.org/abs/2306.03177) (Indenbom et al., 2023)
-- [Xiaobin-Rong implementation](https://github.com/Xiaobin-Rong/deepvqe) (NS-only, clean code)
-- [Okrio implementation](https://github.com/Okrio/deepvqe) (AEC path, reference)
-
-### Reference Code (`reference/`)
-
-Local copies of third-party implementations used as starting points:
-
-- **`deepvqe_xr.py`** — Xiaobin-Rong's NS-only DeepVQE with **real-valued CCM** (no `torch.complex`). This is the variant our CCM is based on for GGML compatibility.
-- **`deepvqe_xr_v1.py`** — Same architecture but uses **complex-valued CCM** (`torch.complex`). Kept for comparison.
-
-Both implement: FE → 5 EncoderBlocks → GRU Bottleneck → 5 DecoderBlocks → CCM (single-input NS, no AEC/far-end branch).
-
-#### Known Bugs in Reference Code
-
-- **Xiaobin-Rong AlignBlock** (line 57): uses `K.shape[1]` (hidden=32) instead of `x_ref.shape[1]` (in_channels=128) for weighted sum reshape — fixed in our `src/align.py`.
-- **Okrio AlignBlock**: `torch.zeros()` without `.to(device)` — fails on GPU. Fixed in our implementation.
+- [DeepVQE: Real Time Deep Voice Quality Enhancement](https://arxiv.org/abs/2306.03177) (Indenbom et al., Interspeech 2023)
+- [GGML](https://github.com/ggerganov/ggml) tensor library
+- [Xiaobin-Rong implementation](https://github.com/Xiaobin-Rong/deepvqe) (NS-only reference)
+- [Okrio implementation](https://github.com/Okrio/deepvqe) (AEC reference)
