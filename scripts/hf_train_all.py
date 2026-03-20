@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
-"""DeepVQE AEC overfit test — self-contained single file for HF Jobs.
+"""DeepVQE AEC full training — self-contained single file for HF Jobs.
 
 Inlines all model, dataset, loss, and training code so no project files are
-needed on the remote machine. Downloads overfit data from HF at startup.
+needed on the remote machine. Downloads DNS5 data from HF at startup.
 
 Usage (local test, single GPU):
-    python scripts/hf_overfit_all.py
+    python scripts/hf_train_all.py --epochs 5
 
 Usage (HF Jobs, 4x A100):
-    bash scripts/hf_overfit.sh
+    bash scripts/hf_train.sh
 """
 
 import argparse
 import functools
-import hashlib
-import json
 import math
 import os
 import random
 import subprocess
 import sys
-from collections import defaultdict
 from datetime import datetime
 from math import gcd
 from pathlib import Path
@@ -76,7 +73,7 @@ def istft(X, n_fft=512, hop_length=256, length=None):
     return torch.istft(X_complex, n_fft, hop_length, window=window, length=length)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Model blocks
+# Model blocks (identical to hf_overfit_all.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class FE(nn.Module):
@@ -296,32 +293,69 @@ class DeepVQEAEC(nn.Module):
         return enhanced
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Loss
+# Loss (full multi-component)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class DeepVQELoss(nn.Module):
-    def __init__(self, mag_l1_weight=1.0, time_l1_weight=1.0,
-                 n_fft=512, hop_length=256):
+    def __init__(self, plcmse_weight=1.0, mag_l1_weight=0.5, time_l1_weight=0.5,
+                 delay_weight=1.0, entropy_weight=0.01,
+                 n_fft=512, hop_length=256, power_law_c=0.3):
         super().__init__()
+        self.plcmse_weight = plcmse_weight
         self.mag_l1_weight = mag_l1_weight
         self.time_l1_weight = time_l1_weight
+        self.delay_weight = delay_weight
+        self.entropy_weight = entropy_weight
         self.n_fft = n_fft
         self.hop_length = hop_length
+        self.c = power_law_c
 
-    def forward(self, pred_stft, target_stft, target_wav=None):
+    def forward(self, pred_stft, target_stft, target_wav=None,
+                delay_dist=None, delay_samples=None, dmax=32):
         components = {}
+
         pred_mag = torch.sqrt(pred_stft[..., 0] ** 2 + pred_stft[..., 1] ** 2 + 1e-12)
         target_mag = torch.sqrt(target_stft[..., 0] ** 2 + target_stft[..., 1] ** 2 + 1e-12)
+
+        # Power-law compressed MSE
+        plcmse = torch.tensor(0.0, device=pred_stft.device)
+        if self.plcmse_weight > 0:
+            pred_c = pred_stft * pred_mag.unsqueeze(-1).pow(self.c - 1)
+            target_c = target_stft * target_mag.unsqueeze(-1).pow(self.c - 1)
+            plcmse = torch.mean((pred_c - target_c) ** 2)
+        components["plcmse"] = plcmse
+
+        # Magnitude L1
         mag_l1 = torch.mean(torch.abs(pred_mag - target_mag))
         components["mag_l1"] = mag_l1
 
+        # Time-domain L1
         time_l1 = torch.tensor(0.0, device=pred_stft.device)
         if target_wav is not None and self.time_l1_weight > 0:
             pred_wav = istft(pred_stft, self.n_fft, self.hop_length, length=target_wav.shape[-1])
             time_l1 = torch.mean(torch.abs(pred_wav - target_wav))
         components["time_l1"] = time_l1
 
-        total = self.mag_l1_weight * mag_l1 + self.time_l1_weight * time_l1
+        # Delay cross-entropy
+        delay_loss = torch.tensor(0.0, device=pred_stft.device)
+        delay_acc = torch.tensor(0.0, device=pred_stft.device)
+        if delay_dist is not None and delay_samples is not None and self.delay_weight > 0:
+            delay_loss, delay_acc = compute_delay_loss(
+                delay_dist, delay_samples, self.hop_length, dmax)
+        components["delay"] = delay_loss
+        components["delay_acc"] = delay_acc
+
+        # Entropy regularization (sharpen attention)
+        entropy = torch.tensor(0.0, device=pred_stft.device)
+        if delay_dist is not None and self.entropy_weight > 0:
+            entropy = -(delay_dist * torch.log(delay_dist + 1e-10)).sum(dim=-1).mean()
+        components["entropy"] = entropy
+
+        total = (self.plcmse_weight * plcmse
+                 + self.mag_l1_weight * mag_l1
+                 + self.time_l1_weight * time_l1
+                 + self.delay_weight * delay_loss
+                 + self.entropy_weight * entropy)
         components["total"] = total
         return total, components
 
@@ -332,16 +366,24 @@ class DeepVQELoss(nn.Module):
 def _load_audio(path, target_len, sr=16000):
     info = sf.info(path)
     file_sr = info.samplerate
+    total_frames = info.frames
+
     if file_sr != sr:
         audio, _ = sf.read(path, dtype="float32")
         if audio.ndim > 1:
             audio = audio[:, 0]
         g = gcd(sr, file_sr)
         audio = resample_poly(audio, sr // g, file_sr // g).astype(np.float32)
-    else:
+    elif total_frames <= target_len:
         audio, _ = sf.read(path, dtype="float32")
         if audio.ndim > 1:
             audio = audio[:, 0]
+    else:
+        start = random.randint(0, total_frames - target_len)
+        audio, _ = sf.read(path, dtype="float32", start=start, stop=start + target_len)
+        if audio.ndim > 1:
+            audio = audio[:, 0]
+
     if len(audio) < target_len:
         pad_total = target_len - len(audio)
         pad_left = random.randint(0, pad_total)
@@ -384,7 +426,7 @@ def _scale_to_ser(nearend, echo, ser_db):
     return echo * (target_echo_rms / (echo_rms + 1e-12))
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Dataset
+# Datasets
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _collect_audio_files(directory):
@@ -400,89 +442,117 @@ def _collect_audio_files(directory):
     return files
 
 
-class FixedSynthDataset(Dataset):
-    def __init__(self, clean_dir, noise_dir, farend_dir, rir_dir,
-                 delays_ms, sr=16000, target_len=48000, n_fft=512,
-                 hop_length=256, snr_db=20.0, ser_db=0.0, repeat=1,
-                 max_rir_length_ms=None, drr_db=None):
+class OnlineSynthDataset(Dataset):
+    """Online synthesis AEC dataset — generates fresh examples on each access."""
+
+    def __init__(self, clean_files, noise_files, farend_files, rir_files,
+                 sr=16000, target_len=48000, n_fft=512, hop_length=256,
+                 snr_range=(5, 40), ser_range=(-10, 10), delay_range=(0, 5120),
+                 single_talk_prob=0.2, max_rir_length_ms=500, drr_range=(3, 30)):
+        self.clean_files = clean_files
+        self.noise_files = noise_files
+        self.farend_files = farend_files or clean_files
+        self.rir_files = rir_files
         self.sr = sr
+        self.target_len = target_len
         self.n_fft = n_fft
         self.hop_length = hop_length
-        self.repeat = repeat
+        self.snr_range = snr_range
+        self.ser_range = ser_range
+        self.delay_range = delay_range
+        self.single_talk_prob = single_talk_prob
+        self.max_rir_length_ms = max_rir_length_ms
+        self.drr_range = drr_range
 
-        clean_files = _collect_audio_files(clean_dir)
-        noise_files = _collect_audio_files(noise_dir)
-        farend_files = _collect_audio_files(farend_dir) or clean_files
-        rir_files = _collect_audio_files(rir_dir)
+        assert clean_files, "No clean files found"
+        assert noise_files, "No noise files found"
+        print(f"OnlineSynthDataset: {len(clean_files)} clean, {len(noise_files)} noise, "
+              f"{len(self.farend_files)} farend, {len(rir_files) if rir_files else 0} RIR")
 
-        assert clean_files, f"No audio files found in {clean_dir}"
-        assert noise_files, f"No audio files found in {noise_dir}"
+    def __len__(self):
+        return len(self.clean_files)
 
-        state = random.getstate()
-        random.seed(42)
-        nearend = _load_audio(clean_files[0], target_len, sr)
-        farend = _load_audio(farend_files[1 % len(farend_files)], target_len, sr)
-        noise = _load_audio(noise_files[0], target_len, sr)
-        max_rir_samples = int(max_rir_length_ms * sr / 1000) if max_rir_length_ms else None
-        rir = _load_random_rir(rir_files, max_rir_samples) if rir_files else None
-        random.setstate(state)
+    def __getitem__(self, idx):
+        nearend = _load_audio(self.clean_files[idx], self.target_len, self.sr)
+        farend = _load_audio(random.choice(self.farend_files), self.target_len, self.sr)
+        noise = _load_audio(random.choice(self.noise_files), self.target_len, self.sr)
 
-        if rir is not None:
-            nearend_reverbed = fftconvolve(nearend, rir)[:target_len].astype(np.float32)
-            echo_base = fftconvolve(farend, rir)[:target_len].astype(np.float32)
+        is_single_talk = random.random() < self.single_talk_prob
+        max_rir_samples = int(self.max_rir_length_ms * self.sr / 1000) if self.max_rir_length_ms else None
+
+        # Apply RIR
+        if self.rir_files:
+            rir = _load_random_rir(self.rir_files, max_rir_samples)
+            nearend_reverbed = fftconvolve(nearend, rir)[:self.target_len].astype(np.float32)
+            farend_rir = _load_random_rir(self.rir_files, max_rir_samples)
+            echo = fftconvolve(farend, farend_rir)[:self.target_len].astype(np.float32)
         else:
             nearend_reverbed = nearend.copy()
-            echo_base = farend.copy()
+            echo = farend.copy()
 
-        if drr_db is not None and rir is not None:
+        # DRR mixing
+        drr_db = None
+        if self.drr_range is not None and self.rir_files:
+            drr_db = random.uniform(*self.drr_range)
             drr_linear = 10 ** (drr_db / 10)
             alpha = drr_linear / (1 + drr_linear)
             nearend_in_mic = (alpha * nearend + (1 - alpha) * nearend_reverbed).astype(np.float32)
         else:
             nearend_in_mic = nearend_reverbed
 
-        self.examples = []
-        for delay_ms in delays_ms:
-            delay_samples = int(delay_ms * sr / 1000)
-            echo = echo_base.copy()
-            if delay_samples > 0:
-                echo = np.pad(echo, (delay_samples, 0))[:target_len]
+        # Delay
+        delay_ms = random.uniform(*self.delay_range)
+        delay_samples = int(delay_ms * self.sr / 1000)
+        if delay_samples > 0:
+            echo = np.pad(echo, (delay_samples, 0))[:self.target_len]
+
+        # SNR/SER
+        snr_db = random.uniform(*self.snr_range)
+        ser_db = random.uniform(*self.ser_range)
+
+        if is_single_talk:
+            nearend_in_mic = np.zeros_like(nearend)
+            clean = np.zeros_like(nearend)
+            scenario = "single_talk_farend"
+        else:
             clean = nearend.copy()
-            echo_scaled = _scale_to_ser(nearend_in_mic, echo, ser_db)
-            noise_scaled = _scale_to_snr(nearend_in_mic, noise, snr_db)
-            mic = nearend_in_mic + echo_scaled + noise_scaled
-            peak = max(np.abs(mic).max(), np.abs(farend).max(), 1e-6)
-            if peak > 0.95:
-                scale = 0.9 / peak
-                mic = mic * scale
-                farend_out = farend * scale
-                clean = clean * scale
-            else:
-                farend_out = farend
-            mic_t = torch.from_numpy(mic).unsqueeze(0)
-            ref_t = torch.from_numpy(farend_out).unsqueeze(0)
-            clean_t = torch.from_numpy(clean).unsqueeze(0)
-            self.examples.append({
-                "mic_stft": stft(mic_t, n_fft, hop_length).squeeze(0),
-                "ref_stft": stft(ref_t, n_fft, hop_length).squeeze(0),
-                "clean_stft": stft(clean_t, n_fft, hop_length).squeeze(0),
-                "mic_wav": mic_t.squeeze(0),
-                "clean_wav": clean_t.squeeze(0),
-                "delay_samples": delay_samples,
-                "metadata": {
-                    "delay_ms": delay_ms, "delay_samples": delay_samples,
-                    "snr_db": snr_db, "ser_db": ser_db, "drr_db": drr_db,
-                    "scenario": "double_talk",
-                },
-            })
-        print(f"FixedSynthDataset: {len(self.examples)} examples x {repeat} repeat "
-              f"= {len(self.examples) * repeat} virtual, delays={delays_ms} ms")
+            scenario = "double_talk"
 
-    def __len__(self):
-        return len(self.examples) * self.repeat
+        if not is_single_talk and _rms(nearend_in_mic) > 1e-6:
+            echo = _scale_to_ser(nearend_in_mic, echo, ser_db)
+            noise = _scale_to_snr(nearend_in_mic, noise, snr_db)
+        else:
+            noise = _scale_to_snr(echo, noise, snr_db)
 
-    def __getitem__(self, idx):
-        return self.examples[idx % len(self.examples)]
+        mic = nearend_in_mic + echo + noise
+
+        # Normalize
+        peak = max(np.abs(mic).max(), np.abs(farend).max(), 1e-6)
+        if peak > 0.95:
+            scale = 0.9 / peak
+            mic *= scale
+            farend_out = farend * scale
+            clean *= scale
+        else:
+            farend_out = farend
+
+        mic_t = torch.from_numpy(mic).unsqueeze(0)
+        ref_t = torch.from_numpy(farend_out).unsqueeze(0)
+        clean_t = torch.from_numpy(clean).unsqueeze(0)
+
+        return {
+            "mic_stft": stft(mic_t, self.n_fft, self.hop_length).squeeze(0),
+            "ref_stft": stft(ref_t, self.n_fft, self.hop_length).squeeze(0),
+            "clean_stft": stft(clean_t, self.n_fft, self.hop_length).squeeze(0),
+            "mic_wav": mic_t.squeeze(0),
+            "clean_wav": clean_t.squeeze(0),
+            "delay_samples": delay_samples,
+            "metadata": {
+                "delay_ms": delay_ms, "delay_samples": delay_samples,
+                "snr_db": snr_db, "ser_db": ser_db, "drr_db": drr_db,
+                "scenario": scenario,
+            },
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Training helpers
@@ -611,11 +681,12 @@ def _unwrap(model, accelerator=None):
     return getattr(model, "_orig_mod", model)
 
 
-def save_checkpoint(model, optimizer, epoch, loss, path, accelerator=None):
+def save_checkpoint(model, optimizer, scheduler, epoch, loss, path, accelerator=None):
     torch.save({
         "epoch": epoch,
         "model_state_dict": _unwrap(model, accelerator).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
         "loss": loss,
     }, path)
 
@@ -624,7 +695,7 @@ def save_checkpoint(model, optimizer, epoch, loss, path, accelerator=None):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Config:
-    """Hardcoded config matching configs/hf_overfit.yaml."""
+    """Full DNS5 training config matching configs/hf_train.yaml."""
     # Model
     mic_channels = [2, 64, 128, 128, 128, 128]
     far_channels = [2, 32, 128]
@@ -639,53 +710,67 @@ class Config:
     n_fft = 512
     hop_length = 256
     # Training
-    batch_size = 64
-    grad_accum_steps = 1
-    num_workers = 4
-    lr = 1e-3
-    weight_decay = 0.0
-    epochs = 20
+    batch_size = 32
+    grad_accum_steps = 2
+    num_workers = 8
+    lr = 1.2e-3
+    weight_decay = 5e-7
+    epochs = 250
     clip_length_sec = 3.0
     grad_clip = 5.0
-    warmup_epochs = 0
-    checkpoint_every = 3
+    warmup_epochs = 3
+    checkpoint_every = 5
     keep_checkpoints = 5
+    early_stop_patience = 20
+    # Loss
+    plcmse_weight = 1.0
+    mag_l1_weight = 0.5
+    time_l1_weight = 0.5
+    delay_weight = 1.0
+    entropy_weight = 0.01
     # Data
-    clean_dir = "/data/overfit/clean"
-    noise_dir = "/data/overfit/noise"
-    rir_dir = "/data/overfit/impulse_responses"
+    clean_dir = "/data/dns5/clean"
+    noise_dir = "/data/dns5/noise"
+    rir_dir = "/data/dns5/impulse_responses"
     farend_dir = ""
-    overfit_delays_ms = [0, 40, 80, 120, 160, 200, 240, 300]
-    overfit_snr_db = 20.0
-    overfit_ser_db = 0.0
-    overfit_repeat = 1024
+    num_val = 500
+    snr_range = (5, 40)
+    ser_range = (-10, 10)
+    delay_range = (0, 5120)
+    single_talk_prob = 0.2
     max_rir_length_ms = 500
-    drr_range = (10, 10)
+    drr_range = (3, 30)
     # Hub
     push_to_hub = True
-    hub_model_id = "richiejp/deepvqe-aec-overfit"
-    push_logs_every = 2
+    hub_model_id = "richiejp/deepvqe-aec"
+    hf_dataset_id = "richiejp/dns5-16k"
+    push_logs_every = 5
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Data download
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def download_data(cfg):
-    """Download overfit audio files from HF dataset."""
+    """Download DNS5 data from HF dataset."""
     if Path(cfg.clean_dir).exists():
-        print(f"Data already exists at {cfg.clean_dir}, skipping download")
-        return
-    print("=== Downloading overfit data from richiejp/deepvqe-overfit-data ===")
+        n = len(list(Path(cfg.clean_dir).rglob("*.wav"))[:10])
+        if n > 0:
+            print(f"Data already exists at {cfg.clean_dir}, skipping download")
+            return
+    print(f"=== Downloading DNS5 from {cfg.hf_dataset_id} ===")
     from huggingface_hub import snapshot_download
     snapshot_download(
-        "richiejp/deepvqe-overfit-data",
-        local_dir="/data/overfit",
+        cfg.hf_dataset_id,
+        local_dir="/data/dns5",
         repo_type="dataset",
     )
-    print("Data contents:")
-    for p in sorted(Path("/data/overfit").rglob("*")):
-        if p.is_file():
-            print(f"  {p} ({p.stat().st_size / 1024:.0f} KB)")
+    for subdir in ["clean", "noise", "impulse_responses"]:
+        p = Path(f"/data/dns5/{subdir}")
+        if p.exists():
+            n = sum(1 for _ in p.rglob("*") if _.is_file())
+            print(f"  {subdir}: {n} files")
+        else:
+            print(f"  WARNING: {subdir} not found!")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Training loop
@@ -710,8 +795,8 @@ def train(cfg):
         print(f"Device: {device}, num_processes: {accelerator.num_processes}")
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ckpt_dir = Path("checkpoints/hf_overfit") / run_id
-    log_dir = Path("logs/hf_overfit") / run_id
+    ckpt_dir = Path("checkpoints/hf_train") / run_id
+    log_dir = Path("logs/hf_train") / run_id
     if is_main:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -733,25 +818,48 @@ def train(cfg):
     n_params = sum(p.numel() for p in raw_model.parameters())
     if is_main:
         print(f"Parameters: {n_params:,}")
-    # Skip torch.compile: causes recompilation storms with train/eval mode switching
-    if is_main:
-        print("Skipping torch.compile (DDP + train/eval recompilation issues)")
 
-    criterion = DeepVQELoss(n_fft=cfg.n_fft, hop_length=cfg.hop_length)
+    criterion = DeepVQELoss(
+        plcmse_weight=cfg.plcmse_weight, mag_l1_weight=cfg.mag_l1_weight,
+        time_l1_weight=cfg.time_l1_weight, delay_weight=cfg.delay_weight,
+        entropy_weight=cfg.entropy_weight, n_fft=cfg.n_fft,
+        hop_length=cfg.hop_length, power_law_c=cfg.power_law_c,
+    )
     optimizer = torch.optim.AdamW(raw_model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     # Dataset
     target_len = int(cfg.clip_length_sec * cfg.sample_rate)
-    train_ds = FixedSynthDataset(
-        clean_dir=cfg.clean_dir, noise_dir=cfg.noise_dir,
-        farend_dir=cfg.farend_dir, rir_dir=cfg.rir_dir,
-        delays_ms=cfg.overfit_delays_ms, sr=cfg.sample_rate,
-        target_len=target_len, n_fft=cfg.n_fft, hop_length=cfg.hop_length,
-        snr_db=cfg.overfit_snr_db, ser_db=cfg.overfit_ser_db,
-        repeat=cfg.overfit_repeat, max_rir_length_ms=cfg.max_rir_length_ms,
-        drr_db=cfg.drr_range[0],
+    all_clean = _collect_audio_files(cfg.clean_dir)
+    noise_files = _collect_audio_files(cfg.noise_dir)
+    farend_files = _collect_audio_files(cfg.farend_dir) or all_clean
+    rir_files = _collect_audio_files(cfg.rir_dir)
+
+    # Train/val split
+    val_clean = all_clean[:cfg.num_val]
+    train_clean = all_clean[cfg.num_val:]
+
+    if is_main:
+        print(f"Train: {len(train_clean)} clean, Val: {len(val_clean)} clean, "
+              f"Noise: {len(noise_files)}, RIR: {len(rir_files)}")
+
+    train_ds = OnlineSynthDataset(
+        clean_files=train_clean, noise_files=noise_files,
+        farend_files=farend_files, rir_files=rir_files,
+        sr=cfg.sample_rate, target_len=target_len,
+        n_fft=cfg.n_fft, hop_length=cfg.hop_length,
+        snr_range=cfg.snr_range, ser_range=cfg.ser_range,
+        delay_range=cfg.delay_range, single_talk_prob=cfg.single_talk_prob,
+        max_rir_length_ms=cfg.max_rir_length_ms, drr_range=cfg.drr_range,
     )
-    val_ds = train_ds
+    val_ds = OnlineSynthDataset(
+        clean_files=val_clean, noise_files=noise_files,
+        farend_files=farend_files, rir_files=rir_files,
+        sr=cfg.sample_rate, target_len=target_len,
+        n_fft=cfg.n_fft, hop_length=cfg.hop_length,
+        snr_range=cfg.snr_range, ser_range=cfg.ser_range,
+        delay_range=cfg.delay_range, single_talk_prob=cfg.single_talk_prob,
+        max_rir_length_ms=cfg.max_rir_length_ms, drr_range=cfg.drr_range,
+    )
 
     pin = device.type == "cuda"
     def worker_init_fn(worker_id):
@@ -778,10 +886,11 @@ def train(cfg):
     criterion = criterion.to(device)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=100, T_mult=2, eta_min=1e-6,
+        optimizer, T_0=50, T_mult=2, eta_min=1e-6,
     )
 
     best_val_loss = float("inf")
+    no_improve_count = 0
     global_step = 0
 
     for epoch in range(cfg.epochs):
@@ -791,6 +900,12 @@ def train(cfg):
         t_start, t_end, t_epochs = cfg.align_temp_start, cfg.align_temp_end, cfg.align_temp_epochs
         temperature = t_start + (t_end - t_start) * min(epoch, t_epochs) / max(t_epochs, 1)
         _unwrap(model, accelerator).align.temperature = temperature
+
+        # Linear warmup
+        if epoch < cfg.warmup_epochs and cfg.warmup_epochs > 0:
+            warmup_factor = (epoch + 1) / cfg.warmup_epochs
+            for pg in optimizer.param_groups:
+                pg["lr"] = cfg.lr * warmup_factor
 
         epoch_loss = 0
         epoch_delay_acc = 0
@@ -806,8 +921,10 @@ def train(cfg):
 
             with accelerator.accumulate(model):
                 enhanced, delay_dist, _ = model(mic_stft, ref_stft, return_delay=True)
-                loss, components = criterion(enhanced, clean_stft, clean_wav)
-                _, delay_acc = compute_delay_loss(delay_dist, delay_samp, cfg.hop_length, cfg.dmax)
+                loss, components = criterion(
+                    enhanced, clean_stft, clean_wav,
+                    delay_dist=delay_dist, delay_samples=delay_samp, dmax=cfg.dmax,
+                )
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -816,20 +933,28 @@ def train(cfg):
                 optimizer.zero_grad()
 
             epoch_loss += components["total"].item()
-            epoch_delay_acc += delay_acc.item()
+            epoch_delay_acc += components["delay_acc"].item()
             n_batches += 1
 
             if is_main:
-                pbar.set_postfix(loss=f"{components['total'].item():.4f}", dacc=f"{delay_acc.item():.0%}")
+                pbar.set_postfix(
+                    loss=f"{components['total'].item():.4f}",
+                    dacc=f"{components['delay_acc'].item():.0%}",
+                )
 
             if is_main and accelerator.sync_gradients:
                 writer.add_scalar("train/loss", components["total"].item(), global_step)
+                writer.add_scalar("train/plcmse", components["plcmse"].item(), global_step)
                 writer.add_scalar("train/mag_l1", components["mag_l1"].item(), global_step)
                 writer.add_scalar("train/time_l1", components["time_l1"].item(), global_step)
-                writer.add_scalar("train/delay_acc", delay_acc.item(), global_step)
+                writer.add_scalar("train/delay_loss", components["delay"].item(), global_step)
+                writer.add_scalar("train/delay_acc", components["delay_acc"].item(), global_step)
+                writer.add_scalar("train/entropy", components["entropy"].item(), global_step)
                 writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
+                writer.add_scalar("train/temperature", temperature, global_step)
 
-        scheduler.step()
+        if epoch >= cfg.warmup_epochs:
+            scheduler.step()
 
         # Epoch summary
         avg_train_loss = epoch_loss / max(n_batches, 1)
@@ -837,22 +962,26 @@ def train(cfg):
 
         # Validation
         model.eval()
-        raw_model = _unwrap(model, accelerator)
+        raw_model_ref = _unwrap(model, accelerator)
         val_loss_sum = torch.tensor(0.0, device=device)
         val_erle_sum = torch.tensor(0.0, device=device)
         val_n = torch.tensor(0, device=device)
-        # Collect samples for spectrograms/audio (up to 3)
         tb_samples = []
+
         with torch.no_grad():
             for batch_idx, batch in enumerate(val_loader):
                 mic_stft = batch["mic_stft"].to(device, non_blocking=True)
                 ref_stft = batch["ref_stft"].to(device, non_blocking=True)
                 clean_stft = batch["clean_stft"].to(device, non_blocking=True)
                 clean_wav = batch["clean_wav"].to(device, non_blocking=True)
-                enhanced, delay_dist, _ = raw_model(mic_stft, ref_stft, return_delay=True)
-                loss, _ = criterion(enhanced, clean_stft, clean_wav)
+                delay_samp = batch["delay_samples"].to(device, non_blocking=True)
 
-                # ERLE
+                enhanced, delay_dist, _ = raw_model_ref(mic_stft, ref_stft, return_delay=True)
+                loss, _ = criterion(
+                    enhanced, clean_stft, clean_wav,
+                    delay_dist=delay_dist, delay_samples=delay_samp, dmax=cfg.dmax,
+                )
+
                 length = clean_wav.shape[-1]
                 mic_wav = batch["mic_wav"].to(device, non_blocking=True)
                 enh_wav = istft(enhanced, cfg.n_fft, cfg.hop_length, length=length)
@@ -862,9 +991,8 @@ def train(cfg):
                 val_erle_sum += erle.detach()
                 val_n += 1
 
-                # Collect diverse samples for TensorBoard (first 3 batches, 1 sample each)
                 if is_main and len(tb_samples) < 3:
-                    si = 0  # first sample in batch
+                    si = 0
                     tb_samples.append({
                         "mic_stft": mic_stft[si:si+1],
                         "ref_stft": ref_stft[si:si+1],
@@ -921,8 +1049,7 @@ def train(cfg):
             # Checkpoint
             if (epoch + 1) % cfg.checkpoint_every == 0:
                 ckpt_path = ckpt_dir / f"epoch_{epoch+1:04d}.pt"
-                save_checkpoint(model, optimizer, epoch + 1, avg_val_loss, ckpt_path, accelerator)
-                # Clean old checkpoints
+                save_checkpoint(model, optimizer, scheduler, epoch + 1, avg_val_loss, ckpt_path, accelerator)
                 ckpts = sorted(ckpt_dir.glob("epoch_*.pt"), key=lambda p: p.stat().st_mtime)
                 while len(ckpts) > cfg.keep_checkpoints:
                     ckpts.pop(0).unlink()
@@ -934,32 +1061,48 @@ def train(cfg):
                     except Exception as e:
                         print(f"  Hub checkpoint upload failed: {e}")
 
-            # Best model
-            if avg_val_loss < best_val_loss:
+            # Best model + early stopping
+            if avg_val_loss < best_val_loss - 0.001:
                 best_val_loss = avg_val_loss
+                no_improve_count = 0
                 best_path = ckpt_dir / "best.pt"
-                save_checkpoint(model, optimizer, epoch + 1, avg_val_loss, best_path, accelerator)
+                save_checkpoint(model, optimizer, scheduler, epoch + 1, avg_val_loss, best_path, accelerator)
                 print(f"  New best val loss: {best_val_loss:.4f}")
+                if hub_api:
+                    try:
+                        hub_api.upload_file(path_or_fileobj=str(best_path),
+                                            path_in_repo="checkpoints/best.pt",
+                                            repo_id=hub_repo_id, run_as_future=True)
+                    except Exception as e:
+                        print(f"  Hub best upload failed: {e}")
+            else:
+                no_improve_count += 1
 
             # Hub logs
             if hub_api and (epoch + 1) % cfg.push_logs_every == 0:
                 try:
-                    hub_api.upload_folder(folder_path=str(log_dir), path_in_repo="logs", repo_id=hub_repo_id, run_as_future=True)
+                    hub_api.upload_folder(folder_path=str(log_dir), path_in_repo="logs",
+                                          repo_id=hub_repo_id, run_as_future=True)
                 except Exception as e:
                     print(f"  Hub log upload failed: {e}")
+
+            # Early stopping
+            if cfg.early_stop_patience > 0 and no_improve_count >= cfg.early_stop_patience:
+                print(f"Early stopping: no improvement for {no_improve_count} epochs")
+                break
 
     # Final uploads
     if is_main:
         if hub_api:
             try:
-                hub_api.upload_folder(folder_path=str(log_dir), path_in_repo="logs", repo_id=hub_repo_id, run_as_future=True)
+                hub_api.upload_folder(folder_path=str(log_dir), path_in_repo="logs",
+                                      repo_id=hub_repo_id, run_as_future=True)
             except Exception as e:
                 print(f"  Final hub log upload failed: {e}")
         if writer:
             writer.close()
         print("Training complete.")
 
-    # Cleanup distributed
     import torch.distributed as dist
     if dist.is_initialized():
         dist.destroy_process_group()
@@ -975,8 +1118,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--repeat", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--no-hub", action="store_true")
+    parser.add_argument("--hf-dataset", type=str, default=None,
+                        help="HF dataset ID to download DNS5 from")
     args = parser.parse_args()
 
     cfg = Config()
@@ -984,10 +1129,12 @@ if __name__ == "__main__":
         cfg.batch_size = args.batch_size
     if args.epochs:
         cfg.epochs = args.epochs
-    if args.repeat:
-        cfg.overfit_repeat = args.repeat
+    if args.lr:
+        cfg.lr = args.lr
     if args.no_hub:
         cfg.push_to_hub = False
+    if args.hf_dataset:
+        cfg.hf_dataset_id = args.hf_dataset
 
     # Only rank 0 downloads data
     if int(os.environ.get("RANK", "0")) == 0:

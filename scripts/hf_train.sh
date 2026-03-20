@@ -1,31 +1,31 @@
 #!/bin/bash
-# Launch DeepVQE training on HuggingFace Jobs (8xH200).
+# Launch DeepVQE full training on HuggingFace Jobs (4x A100).
+#
+# Self-contained: scripts/hf_train_all.py has all model/training code inlined.
+# Downloads DNS5 data from richiejp/dns5-16k HF dataset at startup (~50 GB).
+# Auto-detects GPUs and re-launches with accelerate for multi-GPU DDP.
 #
 # Prerequisites:
-#   pip install huggingface_hub[cli]
-#   huggingface-cli login
+#   hf login
+#   Upload DNS5 data: python scripts/upload_dns5_to_hf.py  (one-time)
 #
 # Usage:
-#   ./scripts/hf_train.sh              # full 250 epoch run
-#   ./scripts/hf_train.sh --timeout 1h # quick test run (edit epochs in cloud.yaml)
+#   ./scripts/hf_train.sh                    # default 24h timeout
+#   ./scripts/hf_train.sh --timeout 6h       # shorter test
 
 set -euo pipefail
 
-EXTRA_ARGS="${*}"
+export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
+export PYTHONUNBUFFERED=1
+
+EXTRA_ARGS="${*:-}"
 
 hf jobs uv run \
-    --flavor h200x8 \
+    --flavor a100x4 \
     --timeout 24h \
     --secrets HF_TOKEN \
-    --with accelerate --with huggingface_hub \
-    --with einops --with pesq --with pystoi --with soundfile \
-    --with scipy --with tensorboard --with gguf --with einops \
+    --with torch --with accelerate --with huggingface_hub \
+    --with einops --with soundfile --with matplotlib \
+    --with scipy --with tensorboard --with tqdm \
     ${EXTRA_ARGS} \
-    -- bash -c '
-        set -euo pipefail
-        echo "=== Downloading DNS5 minimal subset ==="
-        bash scripts/download_dns5_minimal.sh /data
-        echo "=== Starting training ==="
-        accelerate launch --num_processes 8 --mixed_precision bf16 \
-            train.py --config configs/cloud.yaml
-    '
+    scripts/hf_train_all.py

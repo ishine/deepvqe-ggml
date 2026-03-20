@@ -25,7 +25,7 @@ hf jobs uv run \
     --timeout 12m \
     --secrets HF_TOKEN \
     --with torch --with accelerate --with huggingface_hub \
-    --with einops --with soundfile \
+    --with einops --with soundfile --with matplotlib \
     --with scipy --with tensorboard --with tqdm \
     ${EXTRA_ARGS} \
     scripts/hf_overfit_all.py

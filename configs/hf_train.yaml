@@ -1,0 +1,92 @@
+# Full DNS5 training on HF Jobs (4x A100 80GB).
+#
+# Downloads DNS5 data from HF dataset at startup (~50GB).
+# Online synthesis: random clean + noise + RIR + farend mixing per example.
+#
+# Usage:  bash scripts/hf_train.sh
+#
+# Expected: ~250 epochs, ERLE > 20 dB on single-talk at convergence.
+
+model:
+  mic_channels: [2, 64, 128, 128, 128, 128]
+  far_channels: [2, 32, 128]
+  align_hidden: 32
+  dmax: 32
+  align_temp_start: 1.0
+  align_temp_end: 0.1
+  align_temp_epochs: 50
+  power_law_c: 0.3
+
+audio:
+  sample_rate: 16000
+  n_fft: 512
+  hop_length: 256
+  n_freqs: 257
+
+training:
+  batch_size: 32             # per GPU → 32 × 4 = 128 effective with DDP
+  grad_accum_steps: 2        # effective batch 256
+  num_workers: 8
+  lr: 1.2e-3
+  weight_decay: 5.0e-7
+  epochs: 250
+  clip_length_sec: 3.0
+  amp: true
+  grad_clip: 5.0
+  warmup_epochs: 3
+  checkpoint_every: 5
+  keep_checkpoints: 5
+  early_stop_patience: 20
+  early_stop_min_delta: 0.001
+  delay_acc_min: 0.7         # gate after epoch 20
+  erle_min_db: 3.0           # gate after epoch 20
+  lr_scheduler: cosine_restarts
+  lr_patience: 5
+  lr_factor: 0.5
+  lr_min: 1.0e-6
+  lr_cosine_t0: 50
+  lr_cosine_tmult: 2
+
+loss:
+  plcmse_weight: 1.0
+  mag_l1_weight: 0.5
+  time_l1_weight: 0.5
+  sisdr_weight: 0.0
+  smooth_l1_weight: 0.0
+  smooth_l1_beta: 0.01
+  energy_preservation_weight: 0.0
+  energy_pres_mode: relative
+  delay_weight: 1.0
+  entropy_weight: 0.01
+  mask_reg_weight: 0.0
+  power_law_c: 0.3
+
+data:
+  num_train: 0               # 0 = use all (minus num_val)
+  num_val: 500
+  clean_dir: "/data/dns5/clean"
+  noise_dir: "/data/dns5/noise"
+  rir_dir: "/data/dns5/impulse_responses"
+  farend_dir: ""              # reuse clean_dir
+  snr_range: [5, 40]
+  ser_range: [-10, 10]
+  delay_range: [0, 5120]
+  max_delay_frames: 32
+  single_talk_prob: 0.2
+  max_rir_length_ms: 500
+  drr_range: [3, 30]
+
+eval:
+  pesq_subset: 50
+  audio_samples: 3
+
+paths:
+  checkpoint_dir: checkpoints/hf_train
+  log_dir: logs/hf_train
+
+hub:
+  push_to_hub: true
+  hub_model_id: "richiejp/deepvqe-aec"
+  push_logs_every: 5
+  push_checkpoints: true
+  hf_dataset_id: "richiejp/dns5-16k"
