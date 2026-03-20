@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Resample DNS5 data to 16kHz FLAC and upload to HuggingFace Hub.
+"""Resample DNS5 data to 16kHz FLAC and upload to HuggingFace Hub in batches.
 
-One-time script to prepare DNS5 data for HF Jobs training.
-Reads 48kHz WAV files, resamples to 16kHz, saves as FLAC (lossless,
-~6x smaller than 48kHz WAV), and uploads to an HF dataset.
+Streams data: resamples a batch of files to a temp directory, uploads that
+batch as a single HF commit, deletes the local copies, then repeats. Only
+needs disk space for one batch (~500 files) at a time.
+
+Progress is tracked in a manifest file so the script can resume after
+interruption — already-uploaded files are skipped on restart.
 
 Usage:
     # Default: reads from ./datasets_fullband, uploads to richiejp/dns5-16k
     python scripts/upload_dns5_to_hf.py
 
-    # Custom paths:
+    # Custom paths and batch size:
     python scripts/upload_dns5_to_hf.py --source /path/to/datasets_fullband \
-        --repo richiejp/dns5-16k --staging /tmp/dns5-16k
+        --repo richiejp/dns5-16k --batch-size 200
 
-    # Resample only (no upload):
-    python scripts/upload_dns5_to_hf.py --no-upload
-
-    # Upload only (already resampled):
-    python scripts/upload_dns5_to_hf.py --no-resample --staging /path/to/resampled
+    # Dry run (resample first batch only, no upload):
+    python scripts/upload_dns5_to_hf.py --dry-run
 
 Prerequisites:
     pip install soundfile scipy huggingface_hub tqdm
@@ -25,8 +25,10 @@ Prerequisites:
 """
 
 import argparse
-import os
+import json
+import shutil
 import sys
+import tempfile
 from math import gcd
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
@@ -38,8 +40,8 @@ from tqdm import tqdm
 
 TARGET_SR = 16000
 
-# Mapping from source subdirectory names to output names
-# (the Docker entrypoint expects clean/, noise/, impulse_responses/)
+# Mapping from source subdirectory names to repo path prefixes
+# (the training script expects clean/, noise/, impulse_responses/)
 SUBDIR_MAP = {
     "clean_fullband": "clean",
     "noise_fullband": "noise",
@@ -47,8 +49,8 @@ SUBDIR_MAP = {
 }
 
 
-def resample_file(args):
-    """Resample a single audio file to 16kHz FLAC. Worker function for Pool."""
+def resample_one(args):
+    """Resample a single file to 16kHz FLAC. Returns (repo_path, local_path) or error string."""
     src_path, dst_path, target_sr = args
     try:
         info = sf.info(src_path)
@@ -56,7 +58,7 @@ def resample_file(args):
 
         audio, _ = sf.read(src_path, dtype="float32")
         if audio.ndim > 1:
-            audio = audio[:, 0]  # mono
+            audio = audio[:, 0]
 
         if file_sr != target_sr:
             g = gcd(target_sr, file_sr)
@@ -64,13 +66,13 @@ def resample_file(args):
 
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         sf.write(str(dst_path), audio, target_sr, format="FLAC")
-        return None  # success
+        return None
     except Exception as e:
         return f"{src_path}: {e}"
 
 
 def collect_audio_files(directory):
-    """Recursively collect .wav and .flac files."""
+    """Recursively collect .wav and .flac files, sorted."""
     files = []
     for ext in ("*.wav", "*.flac"):
         files.extend(Path(directory).rglob(ext))
@@ -78,66 +80,112 @@ def collect_audio_files(directory):
     return files
 
 
-def resample_subdir(src_dir, dst_dir, subdir_name, dst_name, workers):
-    """Resample all audio files in a subdirectory."""
-    src = src_dir / subdir_name
-    if not src.exists():
-        print(f"  SKIP: {src} does not exist")
-        return 0
+class Manifest:
+    """Tracks uploaded files for resume support."""
 
-    dst = dst_dir / dst_name
-    files = collect_audio_files(src)
-    if not files:
-        print(f"  SKIP: no audio files in {src}")
-        return 0
+    def __init__(self, path):
+        self.path = Path(path)
+        self.uploaded = set()
+        if self.path.exists():
+            data = json.loads(self.path.read_text())
+            self.uploaded = set(data.get("uploaded", []))
 
-    # Build work items, preserving relative paths
+    def mark_batch(self, repo_paths):
+        self.uploaded.update(repo_paths)
+        self._save()
+
+    def is_uploaded(self, repo_path):
+        return repo_path in self.uploaded
+
+    def _save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({
+            "uploaded": sorted(self.uploaded),
+        }))
+
+    def __len__(self):
+        return len(self.uploaded)
+
+
+def build_work_list(src_dir, manifest):
+    """Build list of (src_path, repo_path) for all files not yet uploaded."""
     work = []
-    skipped = 0
-    for f in files:
-        rel = f.relative_to(src)
-        # Change extension to .flac
-        dst_path = dst / rel.with_suffix(".flac")
-        if dst_path.exists():
-            skipped += 1
+    for src_name, dst_name in SUBDIR_MAP.items():
+        src_sub = src_dir / src_name
+        if not src_sub.exists():
+            print(f"  SKIP: {src_sub} does not exist")
             continue
-        work.append((str(f), dst_path, TARGET_SR))
+        files = collect_audio_files(src_sub)
+        for f in files:
+            rel = f.relative_to(src_sub)
+            repo_path = f"{dst_name}/{rel.with_suffix('.flac')}"
+            if not manifest.is_uploaded(repo_path):
+                work.append((str(f), repo_path))
+    return work
 
-    if skipped:
-        print(f"  {dst_name}: {skipped} files already resampled, {len(work)} remaining")
-    else:
-        print(f"  {dst_name}: {len(files)} files to resample")
 
-    if not work:
-        return len(files)
+def process_and_upload_batch(batch, tmp_dir, repo_id, api, workers, manifest, dry_run):
+    """Resample a batch, upload as one commit, clean up."""
+    from huggingface_hub import CommitOperationAdd
+
+    # Resample
+    resample_work = []
+    for src_path, repo_path in batch:
+        dst_path = Path(tmp_dir) / repo_path
+        resample_work.append((src_path, dst_path, TARGET_SR))
 
     errors = []
-    with Pool(workers) as pool:
-        for result in tqdm(pool.imap_unordered(resample_file, work),
-                           total=len(work), desc=f"  {dst_name}", unit="file"):
+    with Pool(min(workers, len(resample_work))) as pool:
+        for result in pool.imap_unordered(resample_one, resample_work):
             if result is not None:
                 errors.append(result)
 
     if errors:
-        print(f"  WARNING: {len(errors)} errors:")
-        for e in errors[:10]:
-            print(f"    {e}")
-        if len(errors) > 10:
-            print(f"    ... and {len(errors) - 10} more")
+        print(f"    {len(errors)} resample errors (skipping those files):")
+        for e in errors[:5]:
+            print(f"      {e}")
 
-    return len(files) - len(errors)
+    # Build commit operations for successfully resampled files
+    operations = []
+    repo_paths = []
+    for src_path, repo_path in batch:
+        local = Path(tmp_dir) / repo_path
+        if local.exists():
+            operations.append(CommitOperationAdd(
+                path_in_repo=repo_path,
+                path_or_fileobj=str(local),
+            ))
+            repo_paths.append(repo_path)
+
+    if not operations:
+        return 0
+
+    if dry_run:
+        print(f"    [dry run] Would upload {len(operations)} files")
+        # Still mark them so --dry-run + resume works for testing
+        return len(operations)
+
+    # Upload as single commit
+    api.create_commit(
+        repo_id=repo_id,
+        repo_type="dataset",
+        operations=operations,
+        commit_message=f"Add {len(operations)} files ({repo_paths[0].split('/')[0]})",
+    )
+
+    # Mark uploaded and clean up
+    manifest.mark_batch(repo_paths)
+
+    # Delete resampled files from tmp
+    for repo_path in repo_paths:
+        local = Path(tmp_dir) / repo_path
+        local.unlink(missing_ok=True)
+
+    return len(operations)
 
 
-def upload_to_hub(staging_dir, repo_id):
-    """Upload the resampled dataset to HuggingFace Hub."""
-    from huggingface_hub import HfApi
-
-    api = HfApi()
-
-    # Create the dataset repo
-    api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
-
-    # Write a README
+def upload_readme(repo_id, api):
+    """Create/update the dataset README."""
     readme = f"""---
 license: cc-by-4.0
 task_categories:
@@ -178,81 +226,85 @@ Original data from Microsoft's DNS Challenge:
 - https://github.com/microsoft/DNS-Challenge
 - License: CC-BY-4.0 (see original repo for details)
 """
-    readme_path = staging_dir / "README.md"
-    readme_path.write_text(readme)
-
-    print(f"Uploading to {repo_id}...")
-    print("  This may take a while for large datasets. Progress shown per-folder.")
-
-    # Upload each subdirectory separately to show progress
-    for subdir in ["clean", "noise", "impulse_responses"]:
-        subdir_path = staging_dir / subdir
-        if not subdir_path.exists():
-            continue
-        n_files = sum(1 for _ in subdir_path.rglob("*") if _.is_file())
-        print(f"  Uploading {subdir}/ ({n_files} files)...")
-        api.upload_folder(
-            folder_path=str(subdir_path),
-            path_in_repo=subdir,
-            repo_id=repo_id,
-            repo_type="dataset",
-        )
-
-    # Upload README
     api.upload_file(
-        path_or_fileobj=str(readme_path),
+        path_or_fileobj=readme.encode(),
         path_in_repo="README.md",
         repo_id=repo_id,
         repo_type="dataset",
     )
 
-    print(f"Done! Dataset available at: https://huggingface.co/datasets/{repo_id}")
-
 
 def main():
-    parser = argparse.ArgumentParser(description="Resample DNS5 to 16kHz and upload to HF Hub")
+    parser = argparse.ArgumentParser(
+        description="Resample DNS5 to 16kHz FLAC and upload to HF Hub in batches")
     parser.add_argument("--source", type=str, default="datasets_fullband",
                         help="Source directory with DNS5 data (default: ./datasets_fullband)")
-    parser.add_argument("--staging", type=str, default="datasets_fullband/dns5_16k",
-                        help="Staging directory for resampled files")
     parser.add_argument("--repo", type=str, default="richiejp/dns5-16k",
                         help="HuggingFace dataset repo ID")
+    parser.add_argument("--batch-size", type=int, default=500,
+                        help="Files per upload batch (default: 500)")
     parser.add_argument("--workers", type=int, default=max(1, cpu_count() - 2),
-                        help=f"Number of parallel workers (default: {max(1, cpu_count() - 2)})")
-    parser.add_argument("--no-upload", action="store_true",
-                        help="Resample only, skip upload")
-    parser.add_argument("--no-resample", action="store_true",
-                        help="Upload only (staging dir must exist)")
+                        help=f"Parallel resample workers (default: {max(1, cpu_count() - 2)})")
+    parser.add_argument("--manifest", type=str, default=".cache/dns5_upload_manifest.json",
+                        help="Progress tracking file for resume")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Resample first batch only, don't upload")
     args = parser.parse_args()
 
     src_dir = Path(args.source)
-    staging_dir = Path(args.staging)
+    if not src_dir.exists():
+        print(f"ERROR: Source directory {src_dir} does not exist")
+        print("Run ./scripts/download_dns5_minimal.sh first")
+        sys.exit(1)
 
-    if not args.no_resample:
-        if not src_dir.exists():
-            print(f"ERROR: Source directory {src_dir} does not exist")
-            print("Run ./scripts/download_dns5_minimal.sh first")
-            sys.exit(1)
+    manifest = Manifest(args.manifest)
+    if len(manifest):
+        print(f"Resuming: {len(manifest)} files already uploaded")
 
-        print(f"Resampling DNS5 from {src_dir} to {staging_dir} at {TARGET_SR} Hz")
-        print(f"Using {args.workers} workers\n")
+    # Build work list (skipping already-uploaded files)
+    print(f"Scanning {src_dir} for audio files...")
+    work = build_work_list(src_dir, manifest)
+    if not work:
+        print("All files already uploaded!")
+        return
 
-        total = 0
-        for src_name, dst_name in SUBDIR_MAP.items():
-            n = resample_subdir(src_dir, staging_dir, src_name, dst_name, args.workers)
-            total += n
+    print(f"{len(work)} files to process in batches of {args.batch_size}")
+    n_batches = (len(work) + args.batch_size - 1) // args.batch_size
+    print(f"{n_batches} batches total\n")
 
-        print(f"\nResampling complete: {total} files in {staging_dir}")
+    # Set up HF API
+    api = None
+    if not args.dry_run:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.create_repo(args.repo, repo_type="dataset", exist_ok=True)
+        upload_readme(args.repo, api)
+        print(f"Uploading to: https://huggingface.co/datasets/{args.repo}\n")
 
-        # Summary of disk usage
-        total_bytes = sum(f.stat().st_size for f in staging_dir.rglob("*") if f.is_file())
-        print(f"Total size: {total_bytes / 1e9:.1f} GB")
+    total_uploaded = 0
+    with tempfile.TemporaryDirectory(prefix="dns5_upload_") as tmp_dir:
+        for batch_idx in range(n_batches):
+            start = batch_idx * args.batch_size
+            end = min(start + args.batch_size, len(work))
+            batch = work[start:end]
 
-    if not args.no_upload:
-        if not staging_dir.exists():
-            print(f"ERROR: Staging directory {staging_dir} does not exist")
-            sys.exit(1)
-        upload_to_hub(staging_dir, args.repo)
+            # Show which subdir this batch is from
+            subdirs = set(rp.split("/")[0] for _, rp in batch)
+            print(f"Batch {batch_idx + 1}/{n_batches}: {len(batch)} files ({', '.join(sorted(subdirs))})")
+
+            n = process_and_upload_batch(
+                batch, tmp_dir, args.repo, api, args.workers, manifest, args.dry_run)
+            total_uploaded += n
+            print(f"    Uploaded {n} files (total: {total_uploaded + len(manifest) - n})")
+
+            if args.dry_run:
+                print("\n[dry run] Stopping after first batch")
+                break
+
+    print(f"\nDone! {total_uploaded} files uploaded this run, "
+          f"{len(manifest)} total in manifest.")
+    if not args.dry_run:
+        print(f"Dataset: https://huggingface.co/datasets/{args.repo}")
 
 
 if __name__ == "__main__":
