@@ -48,13 +48,158 @@ echo "Computing SHA256..."
 CHECKSUM=$(sha256sum "$GGUF_PATH" | cut -d' ' -f1)
 FILE_SIZE=$(stat --format=%s "$GGUF_PATH" 2>/dev/null || stat -f%z "$GGUF_PATH")
 echo "  File:     $GGUF_PATH"
-echo "  Size:     $FILE_SIZE bytes ($(echo "scale=1; $FILE_SIZE / 1048576" | bc) MB)"
+echo "  Size:     $FILE_SIZE bytes ($((FILE_SIZE / 1048576)) MB)"
 echo "  SHA256:   $CHECKSUM"
+
+# Generate model card
+MODEL_CARD="$(mktemp)"
+cat > "$MODEL_CARD" <<'CARD'
+---
+license: apache-2.0
+tags:
+  - audio
+  - speech-enhancement
+  - echo-cancellation
+  - noise-suppression
+  - ggml
+  - gguf
+pipeline_tag: audio-to-audio
+---
+
+# DeepVQE-AEC (GGUF)
+
+GGML/GGUF inference model for **DeepVQE** (Indenbom et al., Interspeech 2023) —
+joint acoustic echo cancellation (AEC), noise suppression, and dereverberation.
+
+## Quick Start
+
+### Build
+
+Requires CMake 3.20+ and a C++17 compiler. The ggml library is included as a
+git submodule.
+
+```bash
+git clone --recursive https://github.com/richiejp/deepvqe-ggml
+cd deepvqe-ggml/ggml
+
+# CLI only
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# With shared library (C API for FFI from Python, Go, etc.)
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DDEEPVQE_BUILD_SHARED=ON
+cmake --build build
+```
+
+### CLI
+
+Process STFT-domain audio (NumPy .npy files):
+
+```bash
+./build/deepvqe deepvqe.gguf --input-npy mic_stft.npy ref_stft.npy
+```
+
+### C API
+
+The shared library (`libdeepvqe.so`) exposes a simple C API for integration
+into any language:
+
+```c
+#include "deepvqe_api.h"
+
+// Load model
+uintptr_t ctx = deepvqe_new("deepvqe.gguf");
+
+// Process 16kHz mono float32 audio
+//   mic: microphone input (with echo + noise)
+//   ref: far-end reference (what the speaker is hearing)
+//   out: cleaned output (pre-allocated, same length)
+int ret = deepvqe_process_f32(ctx, mic, ref, n_samples, out);
+
+// int16 PCM variant also available
+int ret = deepvqe_process_s16(ctx, mic_s16, ref_s16, n_samples, out_s16);
+
+deepvqe_free(ctx);
+```
+
+### Python (ctypes)
+
+```python
+import ctypes, numpy as np
+
+lib = ctypes.CDLL("./build/libdeepvqe.so")
+lib.deepvqe_new.restype = ctypes.c_void_p
+lib.deepvqe_new.argtypes = [ctypes.c_char_p]
+lib.deepvqe_process_f32.restype = ctypes.c_int
+lib.deepvqe_process_f32.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ctypes.c_int, ctypes.c_void_p,
+]
+lib.deepvqe_free.argtypes = [ctypes.c_void_p]
+
+ctx = lib.deepvqe_new(b"deepvqe.gguf")
+
+mic = np.zeros(16000, dtype=np.float32)  # 1 second of 16kHz audio
+ref = np.zeros(16000, dtype=np.float32)
+out = np.empty_like(mic)
+
+ret = lib.deepvqe_process_f32(
+    ctx,
+    mic.ctypes.data,
+    ref.ctypes.data,
+    len(mic),
+    out.ctypes.data,
+)
+
+lib.deepvqe_free(ctx)
+```
+
+Used in production by [VoxInput](https://github.com/richiejp/VoxInput) for
+real-time voice input with echo cancellation.
+
+## Model Details
+
+| | |
+|---|---|
+| **Architecture** | DeepVQE with AlignBlock (soft delay estimation) |
+| **Parameters** | ~8.0M |
+| **Sample rate** | 16 kHz |
+| **STFT** | 512 FFT, 256 hop (16 ms), sqrt-Hann window |
+| **Delay range** | dmax=32 frames (320 ms) |
+| **Format** | GGUF (F32) |
+
+## Training Status
+
+**This is an early checkpoint** trained on a small subset of the DNS5 dataset
+on a single NVIDIA RTX 5070 (16 GB). It demonstrates that the architecture and
+inference pipeline work end-to-end, but it has not yet been trained to
+convergence on the full dataset.
+
+We are working on a larger-scale training run on Hugging Face infrastructure.
+If you would like to help with compute, data, or training expertise, please
+open an issue on the [GitHub repo](https://github.com/richiejp/deepvqe-ggml)
+— contributions and support are very welcome!
+
+### Data
+
+- [DNS5](https://github.com/microsoft/DNS-Challenge) (Microsoft, CC BY 4.0) — minimal subset
+- [ICASSP 2022 AEC Challenge](https://github.com/microsoft/AEC-Challenge) — echo scenarios
+
+See [deepvqe-ggml](https://github.com/richiejp/deepvqe-ggml) for training
+code and full documentation.
+
+## References
+
+- [DeepVQE paper](https://arxiv.org/abs/2306.03177) (Indenbom et al., 2023)
+- [deepvqe-ggml](https://github.com/richiejp/deepvqe-ggml) — training & export code
+CARD
+trap 'rm -f "$MODEL_CARD"' EXIT
 
 # Upload
 echo ""
 echo "Uploading to huggingface.co/$REPO_ID ..."
-huggingface-cli upload "$REPO_ID" "$GGUF_PATH" deepvqe.gguf --repo-type model
+uvx hf upload "$REPO_ID" "$MODEL_CARD" README.md --repo-type model
+uvx hf upload "$REPO_ID" "$GGUF_PATH" deepvqe.gguf --repo-type model
 
 echo ""
 echo "Done! Update VoxInput's internal/deepvqe/model.go with:"

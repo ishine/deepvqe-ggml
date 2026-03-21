@@ -77,8 +77,17 @@ make test-ggml
 
 ## Model Weights
 
-Model weights are stored in GGUF format. To train your own model and export
-weights, see [train/](train/).
+Pre-trained weights are available on Hugging Face:
+[richiejp/deepvqe-aec-gguf](https://huggingface.co/richiejp/deepvqe-aec-gguf).
+
+**Note:** The current checkpoint was trained on a small subset of the DNS5
+dataset on a single NVIDIA RTX 5070 (16 GB). It demonstrates end-to-end
+functionality but has not been trained to convergence on the full dataset. We
+are working on a larger-scale training run on Hugging Face infrastructure. If
+you would like to help with compute, data, or training expertise, please open
+an issue — contributions and support are very welcome!
+
+To train your own model and export weights, see [train/](train/).
 
 ## Training
 

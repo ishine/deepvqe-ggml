@@ -23,7 +23,6 @@
 #   clean          Remove checkpoints, logs, eval output
 
 IMAGE        := deepvqe
-CONTAINER    := deepvqe-train
 GPU          := all
 CONFIG       := configs/default.yaml
 
@@ -42,8 +41,11 @@ EXTRA_ARGS   ?=
 
 # Project root is mounted at /workspace/deepvqe.
 # -w sets working directory to train/ so Python imports resolve correctly.
-DOCKER_RUN := docker run --rm --device nvidia.com/gpu=$(GPU) \
-	--name $(CONTAINER) \
+# DOCKER_TRAIN is for long-running training jobs (uses deepvqe-train name).
+# DOCKER_UTIL is for short-lived utility tasks (export, eval, tests) so they
+# don't conflict with a running training container.
+define DOCKER_BASE
+docker run --rm --device nvidia.com/gpu=$(GPU) \
 	--shm-size=4g \
 	--device /dev/fuse --cap-add SYS_ADMIN \
 	-e TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
@@ -55,6 +57,10 @@ DOCKER_RUN := docker run --rm --device nvidia.com/gpu=$(GPU) \
 	-v $(EVAL_DIR):/workspace/deepvqe/eval_output \
 	-v $(CACHE_DIR):/cache/torch_inductor \
 	-w /workspace/deepvqe/train
+endef
+
+DOCKER_TRAIN = $(DOCKER_BASE) --name deepvqe-train
+DOCKER_UTIL  = $(DOCKER_BASE) --name deepvqe-util
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
@@ -66,22 +72,22 @@ build: ## Build Docker training image
 
 .PHONY: test
 test: build ## Smoke test: dummy data, 2 epochs, batch 4
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_TRAIN) $(IMAGE) \
 		python train.py --config $(CONFIG) --dummy $(EXTRA_ARGS)
 
 .PHONY: train-minimal
 train-minimal: build ## Train on DNS5 minimal subset
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_TRAIN) $(IMAGE) \
 		python train.py --config $(CONFIG) $(EXTRA_ARGS)
 
 .PHONY: train-full
 train-full: build ## Train on full dataset (set DATA_DIR= to override)
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_TRAIN) $(IMAGE) \
 		python train.py --config $(CONFIG) $(EXTRA_ARGS)
 
 .PHONY: overfit
 overfit: build ## Overfit test: 8 real audio examples with varied delays
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_TRAIN) $(IMAGE) \
 		python train.py --config configs/overfit.yaml --overfit-real $(EXTRA_ARGS)
 
 # ── Evaluation & Export ──────────────────────────────────────────────────────
@@ -90,17 +96,17 @@ CHECKPOINT ?= checkpoints/best.pt
 
 .PHONY: eval
 eval: build ## Evaluate a checkpoint (set CHECKPOINT=path)
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python eval.py --config $(CONFIG) --checkpoint $(CHECKPOINT) $(EXTRA_ARGS)
 
 .PHONY: listen
 listen: build ## Generate WAV audio from checkpoint (set CHECKPOINT=path)
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/listen.py --config $(CONFIG) --checkpoint $(CHECKPOINT) $(EXTRA_ARGS)
 
 .PHONY: export
 export: build ## Export checkpoint to GGUF (set CHECKPOINT=path)
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python export_ggml.py --config $(CONFIG) --checkpoint $(CHECKPOINT) \
 			--output ../deepvqe.gguf $(EXTRA_ARGS)
 
@@ -110,13 +116,13 @@ BLOCK ?= mic_enc1
 
 .PHONY: compare-pt
 compare-pt: build ## Export PyTorch intermediates for GGML comparison
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/compare.py --mode pytorch --checkpoint $(CHECKPOINT) \
 			--output ../intermediates/pytorch --use-audio $(EXTRA_ARGS)
 
 .PHONY: compare-block
 compare-block: build ## Export single block I/O (set BLOCK=mic_enc1)
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/compare.py --mode block --checkpoint $(CHECKPOINT) \
 			--block $(BLOCK) --output ../intermediates/blocks --use-audio $(EXTRA_ARGS)
 
@@ -124,19 +130,19 @@ compare-block: build ## Export single block I/O (set BLOCK=mic_enc1)
 
 .PHONY: test-model
 test-model: build ## Run model unit tests
-	$(DOCKER_RUN) $(IMAGE) python test_model.py
+	$(DOCKER_UTIL) $(IMAGE) python test_model.py
 
 .PHONY: test-data
 test-data: build ## Run data pipeline tests
-	$(DOCKER_RUN) $(IMAGE) python test_data.py
+	$(DOCKER_UTIL) $(IMAGE) python test_data.py
 
 .PHONY: test-blocks
 test-blocks: build ## Run block-level verification tests
-	$(DOCKER_RUN) $(IMAGE) python test_blocks.py
+	$(DOCKER_UTIL) $(IMAGE) python test_blocks.py
 
 .PHONY: test-ccm
 test-ccm: build ## Run CCM learning isolation tests
-	$(DOCKER_RUN) $(IMAGE) python test_ccm_learning.py
+	$(DOCKER_UTIL) $(IMAGE) python test_ccm_learning.py
 
 .PHONY: tests
 tests: test-model test-data test-blocks test-ccm ## Run all unit tests
@@ -159,22 +165,22 @@ run: build ## Run arbitrary command: make run CMD="python script.py"
 
 .PHONY: test-erle
 test-erle: build ## Test ERLE and delay estimation with real speech
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/test_erle.py $(EXTRA_ARGS)
 
 .PHONY: check
 check: build ## Check training progress (loss, entropy, grad norms)
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/check_training.py $(EXTRA_ARGS)
 
 .PHONY: report
 report: build ## Training report (summary, scalars, loss, gradients, export)
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/report_training.py $(EXTRA_ARGS)
 
 .PHONY: diagnose
 diagnose: build ## Diagnose decoder activations from overfit checkpoint
-	$(DOCKER_RUN) $(IMAGE) \
+	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/diagnose_decoder.py $(EXTRA_ARGS)
 
 .PHONY: tensorboard
