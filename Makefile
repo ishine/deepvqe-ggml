@@ -8,7 +8,7 @@
 #   train-full     Train on full dataset (mount custom data dir)
 #   eval           Evaluate a checkpoint
 #   export         Export checkpoint to GGUF
-#   download-data  Download DNS5 minimal dataset
+#   upload-data    Download full DNS5, resample, upload to HF Hub
 #   test-model     Run model unit tests
 #   test-data      Run data pipeline tests
 #   tensorboard    Launch TensorBoard viewer
@@ -113,9 +113,9 @@ tests: test-model test-data test-blocks test-ccm ## Run all unit tests
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 
-.PHONY: download-data
-download-data: ## Download DNS5 minimal dataset
-	bash scripts/download_dns5_minimal.sh $(DATA_DIR)
+.PHONY: upload-data
+upload-data: ## Download full DNS5, resample to 16kHz, upload to HF Hub
+	bash scripts/upload_dns5_full.sh
 
 # ── Run arbitrary commands ──────────────────────────────────────────────────
 
