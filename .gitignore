@@ -15,6 +15,9 @@ eval_output/
 # Training data
 datasets_fullband/
 
+# ONNX models
+models/
+
 # Caches
 .cache/
 

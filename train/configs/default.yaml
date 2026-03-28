@@ -20,14 +20,14 @@ training:
   num_workers: 12
   lr: 3.0e-4
   weight_decay: 5.0e-7
-  epochs: 250
+  epochs: 100
   clip_length_sec: 3.0
   amp: true
   grad_clip: 5.0
-  warmup_epochs: 0
+  warmup_epochs: 5
   checkpoint_every: 5
   keep_checkpoints: 5
-  early_stop_patience: 50
+  early_stop_patience: 0
   early_stop_min_delta: 1.0e-4
   delay_acc_min: 0.5
   erle_min_db: 3.0
@@ -35,7 +35,7 @@ training:
   lr_patience: 10              # fallback if switched to plateau
   lr_factor: 0.5
   lr_min: 1.0e-6
-  lr_cosine_t0: 200
+  lr_cosine_t0: 50
   lr_cosine_tmult: 1
 
 loss:
@@ -55,9 +55,9 @@ loss:
   power_law_c: 0.3
 
 data:
-  clean_dir: "/data/dns5/clean"
-  noise_dir: "/data/dns5/noise"
-  rir_dir: "/data/dns5/impulse_responses"
+  clean_dir: "/workspace/deepvqe/datasets_fullband/clean"
+  noise_dir: "/workspace/deepvqe/datasets_fullband/noise"
+  rir_dir: "/workspace/deepvqe/datasets_fullband/impulse_responses"
   farend_dir: ""      # empty = reuse clean_dir
   snr_range: [5, 40]
   ser_range: [-10, 10]
@@ -66,6 +66,7 @@ data:
   single_talk_prob: 0.2
   max_rir_length_ms: 500
   drr_range: [0, 20]
+  dnsmos_ovrl_min: 3.0  # DNSMOS quality filter (0=disabled)
   num_val: 1000
 
 eval:

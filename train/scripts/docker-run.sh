@@ -27,7 +27,6 @@ DOCKER_ARGS=(
     --device "nvidia.com/gpu=$GPU"
     --name "$CONTAINER"
     --shm-size=4g
-    --device /dev/fuse --cap-add SYS_ADMIN
     -e TORCHINDUCTOR_FX_GRAPH_CACHE=1
     -e TORCHINDUCTOR_CACHE_DIR=/cache/torch_inductor
     -v "$PROJECT_ROOT:/workspace/deepvqe"

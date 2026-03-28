@@ -65,9 +65,9 @@ loss:
 data:
   num_train: 8              # tiny: fits in one batch
   num_val: 8                # same indices → same examples as train
-  clean_dir: "/data/dns5/clean"
-  noise_dir: "/data/dns5/noise"
-  rir_dir: "/data/dns5/impulse_responses"
+  clean_dir: "/workspace/deepvqe/datasets_fullband/clean"
+  noise_dir: "/workspace/deepvqe/datasets_fullband/noise"
+  rir_dir: "/workspace/deepvqe/datasets_fullband/impulse_responses"
   farend_dir: ""            # reuse clean_dir
   snr_range: [5, 40]
   ser_range: [-10, 10]

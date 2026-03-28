@@ -6,8 +6,7 @@
 # Targets:
 #   build          Build the Docker training image
 #   test           Quick smoke test (dummy data, 2 epochs)
-#   train-minimal  Train on DNS5 minimal subset
-#   train-full     Train on full dataset
+#   train          Train on DNS5 dataset
 #   overfit        Overfit test (8 real audio examples)
 #   eval           Evaluate a checkpoint
 #   listen         Generate WAV audio
@@ -17,12 +16,14 @@
 #   test-blocks    Run block-level verification tests
 #   test-ccm       Run CCM learning isolation tests
 #   tests          Run all unit tests
-#   download-data  Download DNS5 minimal dataset
+#   download-data  Download DNS5 16kHz from HuggingFace
+#   score-dnsmos   Score clean speech with DNSMOS P.835
 #   tensorboard    Launch TensorBoard viewer
 #   shell          Open a shell in the container
 #   clean          Remove checkpoints, logs, eval output
 
 IMAGE        := deepvqe
+IMAGE_ONNX   := deepvqe-onnx
 GPU          := all
 CONFIG       := configs/default.yaml
 
@@ -47,7 +48,6 @@ EXTRA_ARGS   ?=
 define DOCKER_BASE
 docker run --rm --device nvidia.com/gpu=$(GPU) \
 	--shm-size=4g \
-	--device /dev/fuse --cap-add SYS_ADMIN \
 	-e TORCHINDUCTOR_FX_GRAPH_CACHE=1 \
 	-e TORCHINDUCTOR_CACHE_DIR=/cache/torch_inductor \
 	-v $(PROJECT_ROOT):/workspace/deepvqe \
@@ -68,6 +68,10 @@ DOCKER_UTIL  = $(DOCKER_BASE) --name deepvqe-util
 build: ## Build Docker training image
 	docker build -t $(IMAGE) -f Dockerfile $(PROJECT_ROOT)
 
+.PHONY: build-onnx
+build-onnx: ## Build ONNX scoring image (CUDA 12)
+	docker build -t $(IMAGE_ONNX) -f Dockerfile.onnx $(PROJECT_ROOT)
+
 # ── Training ─────────────────────────────────────────────────────────────────
 
 .PHONY: test
@@ -75,13 +79,8 @@ test: build ## Smoke test: dummy data, 2 epochs, batch 4
 	$(DOCKER_TRAIN) $(IMAGE) \
 		python train.py --config $(CONFIG) --dummy $(EXTRA_ARGS)
 
-.PHONY: train-minimal
-train-minimal: build ## Train on DNS5 minimal subset
-	$(DOCKER_TRAIN) $(IMAGE) \
-		python train.py --config $(CONFIG) $(EXTRA_ARGS)
-
-.PHONY: train-full
-train-full: build ## Train on full dataset (set DATA_DIR= to override)
+.PHONY: train
+train: build ## Train on DNS5 dataset
 	$(DOCKER_TRAIN) $(IMAGE) \
 		python train.py --config $(CONFIG) $(EXTRA_ARGS)
 
@@ -150,8 +149,12 @@ tests: test-model test-data test-blocks test-ccm ## Run all unit tests
 # ── Data ─────────────────────────────────────────────────────────────────────
 
 .PHONY: download-data
-download-data: ## Download DNS5 minimal dataset
-	bash scripts/download_dns5_minimal.sh $(DATA_DIR)
+download-data: build ## Download DNS5 16kHz dataset from HuggingFace
+	$(DOCKER_UTIL) $(IMAGE) python scripts/download_dns5_hf.py $(EXTRA_ARGS)
+
+.PHONY: score-dnsmos
+score-dnsmos: build-onnx ## Score clean files with DNSMOS P.835 (GPU)
+	$(DOCKER_UTIL) $(IMAGE_ONNX) python3 scripts/score_dnsmos.py $(EXTRA_ARGS)
 
 # ── Run arbitrary commands ──────────────────────────────────────────────────
 

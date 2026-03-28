@@ -24,9 +24,60 @@ from data.synth import (
 from src.stft import stft
 
 _CACHE_DIR = Path(".cache/file_lists")
+_DNSMOS_DIR = Path(".cache/dnsmos")
 
 
-def _collect_audio_files(directory):
+def dir_cache_key(directory: str) -> str:
+    """MD5 hash of the resolved absolute path, used as a cache filename."""
+    return hashlib.md5(str(Path(directory).resolve()).encode()).hexdigest()
+
+
+def dnsmos_scores_path(clean_dir: str) -> Path:
+    """Return the path to the DNSMOS scores cache file for a clean directory."""
+    return _DNSMOS_DIR / f"{dir_cache_key(clean_dir)}.json"
+
+
+def _filter_by_dnsmos(file_list, clean_dir, ovrl_min):
+    """Filter file list by DNSMOS OVRL score.
+
+    Loads pre-computed scores from .cache/dnsmos/<hash>.json.
+    Returns unfiltered list with a warning if scores file is missing.
+    """
+    scores_file = dnsmos_scores_path(clean_dir)
+
+    if not scores_file.exists():
+        print(f"WARNING: DNSMOS scores not found at {scores_file}")
+        print(f"  Run: python scripts/score_dnsmos.py --clean-dir {clean_dir}")
+        print(f"  Proceeding without quality filtering.")
+        return file_list
+
+    data = json.loads(scores_file.read_text())
+    scores = data.get("scores", {})
+
+    kept = []
+    skipped = 0
+    unscored = 0
+    errors = 0
+    for f in file_list:
+        s = scores.get(f)
+        if s is None:
+            unscored += 1
+            kept.append(f)  # fail-open: keep files without scores
+        elif "error" in s:
+            errors += 1
+            kept.append(f)
+        elif s["OVRL"] >= ovrl_min:
+            kept.append(f)
+        else:
+            skipped += 1
+
+    print(f"DNSMOS filter: {len(kept)}/{len(file_list)} clean files "
+          f"(OVRL >= {ovrl_min}, skipped {skipped}, "
+          f"unscored {unscored}, errors {errors})")
+    return kept
+
+
+def collect_audio_files(directory):
     """Recursively collect .wav and .flac files, with disk caching.
 
     On large datasets (500k+ files), rglob + sort can take minutes.
@@ -40,10 +91,8 @@ def _collect_audio_files(directory):
     if not d.exists():
         return []
 
-    # Cache key based on absolute path
     abs_path = str(d.resolve())
-    cache_key = hashlib.md5(abs_path.encode()).hexdigest()
-    cache_file = _CACHE_DIR / f"{cache_key}.json"
+    cache_file = _CACHE_DIR / f"{dir_cache_key(directory)}.json"
 
     # Try loading from cache
     if cache_file.exists():
@@ -97,10 +146,13 @@ class AECDataset(Dataset):
         self.max_rir_length_ms = cfg.data.max_rir_length_ms
         self.drr_range = tuple(cfg.data.drr_range)
 
-        all_clean = _collect_audio_files(cfg.data.clean_dir)
-        self.noise_files = _collect_audio_files(cfg.data.noise_dir)
-        self.farend_files = _collect_audio_files(cfg.data.farend_dir)
-        self.rir_files = _collect_audio_files(cfg.data.rir_dir) or None
+        all_clean = collect_audio_files(cfg.data.clean_dir)
+        if cfg.data.dnsmos_ovrl_min > 0:
+            all_clean = _filter_by_dnsmos(all_clean, cfg.data.clean_dir,
+                                          cfg.data.dnsmos_ovrl_min)
+        self.noise_files = collect_audio_files(cfg.data.noise_dir)
+        self.farend_files = collect_audio_files(cfg.data.farend_dir)
+        self.rir_files = collect_audio_files(cfg.data.rir_dir) or None
 
         # If farend_dir not specified, use clean_dir (full pool, no split)
         if not self.farend_files:
@@ -276,10 +328,10 @@ class FixedSynthDataset(Dataset):
         self.repeat = repeat
 
         # Collect file lists and pick deterministic first files
-        clean_files = _collect_audio_files(clean_dir)
-        noise_files = _collect_audio_files(noise_dir)
-        farend_files = _collect_audio_files(farend_dir) or clean_files
-        rir_files = _collect_audio_files(rir_dir)
+        clean_files = collect_audio_files(clean_dir)
+        noise_files = collect_audio_files(noise_dir)
+        farend_files = collect_audio_files(farend_dir) or clean_files
+        rir_files = collect_audio_files(rir_dir)
 
         assert clean_files, f"No audio files found in {clean_dir}"
         assert noise_files, f"No audio files found in {noise_dir}"

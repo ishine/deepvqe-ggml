@@ -81,6 +81,7 @@ class DataConfig:
     single_talk_prob: float = 0.2
     max_rir_length_ms: float = 500.0
     drr_range: Tuple[float, float] = (0, 20)  # DRR dB, uniform
+    dnsmos_ovrl_min: float = 0.0  # DNSMOS quality filter (0 = disabled)
     num_train: int = 10000  # only used for DummyAECDataset
     num_val: int = 1000
     # FixedSynthDataset settings (used with --overfit-real)

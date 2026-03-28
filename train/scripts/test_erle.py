@@ -39,13 +39,14 @@ def main():
 
     # Find clean speech files
     clean_dirs = [
-        "/data/dns5/clean",  # Docker sqsh mount
+        "/workspace/deepvqe/datasets_fullband/clean",
     ]
     clean_files = []
     for d in clean_dirs:
-        clean_files.extend(glob.glob(os.path.join(d, "**", "*.wav"), recursive=True))
+        for ext in ("*.wav", "*.flac"):
+            clean_files.extend(glob.glob(os.path.join(d, "**", ext), recursive=True))
     if not clean_files:
-        print("ERROR: No clean speech files found. Run inside Docker with sqsh mounts.")
+        print("ERROR: No clean speech files found. Run inside Docker with data mounted.")
         return
 
     print(f"Found {len(clean_files)} clean speech files")
