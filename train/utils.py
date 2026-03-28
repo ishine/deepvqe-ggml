@@ -40,22 +40,19 @@ def delay_samples_to_frame(delay_samples, hop_length, dmax):
     return target_frames.clamp(0, dmax - 1)
 
 
-def save_checkpoint(model, optimizer, schedulers, epoch, loss, path):
-    sched_states = {k: s.state_dict() for k, s in schedulers.items()}
+def save_checkpoint(model, optimizer, epoch, loss, path):
     torch.save(
         {
             "epoch": epoch,
             "model_state_dict": _unwrap(model).state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_states": sched_states,
             "loss": loss,
         },
         path,
     )
 
 
-def load_checkpoint(path, model, optimizer=None, schedulers=None,
-                    skip_scheduler=False):
+def load_checkpoint(path, model, optimizer=None):
     ckpt = torch.load(path, weights_only=False)
     state = ckpt["model_state_dict"]
     # Strip _orig_mod. prefix for backward compat with old checkpoints
@@ -63,8 +60,4 @@ def load_checkpoint(path, model, optimizer=None, schedulers=None,
     _unwrap(model).load_state_dict(state)
     if optimizer and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    if schedulers and "scheduler_states" in ckpt and not skip_scheduler:
-        for k, s in schedulers.items():
-            if k in ckpt["scheduler_states"]:
-                s.load_state_dict(ckpt["scheduler_states"][k])
     return ckpt["epoch"]

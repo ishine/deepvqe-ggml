@@ -1,7 +1,7 @@
 """DeepVQE AEC training script.
 
 Features:
-- AdamW optimizer with linear warmup + ReduceLROnPlateau
+- Schedule-Free AdamW optimizer (built-in warmup, no LR schedule)
 - Mixed precision (BF16 autocast, TF32 for remaining FP32 ops)
 - Gradient accumulation for large effective batch sizes
 - Gradient clipping
@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import schedulefree
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -101,35 +102,6 @@ def compute_erle(mic_wav, enhanced_wav, clean_wav):
     erle = 10 * torch.log10(echo_power / (residual_power + 1e-10))
     return erle.mean()
 
-
-def get_warmup_scheduler(optimizer, cfg, steps_per_epoch):
-    """Linear warmup scheduler (per-step) for the first few epochs."""
-    warmup_steps = cfg.training.warmup_epochs * steps_per_epoch
-
-    def lr_lambda(step):
-        if warmup_steps <= 0:
-            return 1.0
-        return min(1.0, step / warmup_steps)
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-
-def get_epoch_scheduler(optimizer, cfg):
-    """Per-epoch scheduler: plateau or cosine with warm restarts."""
-    if cfg.training.lr_scheduler == "cosine_restarts":
-        return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer,
-            T_0=cfg.training.lr_cosine_t0,
-            T_mult=cfg.training.lr_cosine_tmult,
-            eta_min=cfg.training.lr_min,
-        )
-    return torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=cfg.training.lr_factor,
-        patience=cfg.training.lr_patience,
-        min_lr=cfg.training.lr_min,
-    )
 
 
 
@@ -226,8 +198,7 @@ def log_audio_and_spectrograms(writer, model, val_batches, epoch, cfg, device,
     model.train()
 
 
-def train(cfg, resume=None, dummy=False, overfit_real=False,
-          fresh_scheduler=False):
+def train(cfg, resume=None, dummy=False, overfit_real=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
@@ -254,8 +225,9 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
     # Loss
     criterion = DeepVQELoss.from_config(cfg).to(device)
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(
+    # Optimizer (Schedule-Free AdamW — no LR schedule needed)
+    # warmup_steps computed after dataloader creation, set below
+    optimizer = schedulefree.AdamWScheduleFree(
         model.parameters(),
         lr=cfg.training.lr,
         weight_decay=cfg.training.weight_decay,
@@ -333,8 +305,8 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
     )
 
     steps_per_epoch = len(train_loader) // cfg.training.grad_accum_steps
-    warmup_scheduler = get_warmup_scheduler(optimizer, cfg, steps_per_epoch)
-    epoch_scheduler = get_epoch_scheduler(optimizer, cfg)
+    warmup_steps = cfg.training.warmup_epochs * steps_per_epoch
+    optimizer.warmup_steps = warmup_steps
 
     # AMP — BF16 on CUDA (no GradScaler needed), disabled on CPU
     use_amp = cfg.training.amp and device.type == "cuda"
@@ -344,16 +316,11 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
         enabled=use_amp,
     )
 
-    schedulers = {"warmup": warmup_scheduler, "epoch": epoch_scheduler}
-
     # Resume
     start_epoch = 0
     best_val_loss = float("inf")
     if resume:
-        start_epoch = load_checkpoint(resume, model, optimizer, schedulers,
-                                      skip_scheduler=fresh_scheduler)
-        if fresh_scheduler:
-            print("Fresh scheduler: ignoring saved scheduler state")
+        start_epoch = load_checkpoint(resume, model, optimizer)
         # Restore best_val_loss from checkpoint so early stopping persists
         ckpt = torch.load(resume, weights_only=False)
         if "loss" in ckpt:
@@ -363,7 +330,6 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
             print(f"Resumed from epoch {start_epoch}")
 
     global_step = start_epoch * steps_per_epoch
-    warmup_done = start_epoch >= cfg.training.warmup_epochs
     accum_steps = cfg.training.grad_accum_steps
     patience = cfg.training.early_stop_patience
     min_delta = cfg.training.early_stop_min_delta
@@ -371,6 +337,7 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
 
     for epoch in range(start_epoch, cfg.training.epochs):
         model.train()
+        optimizer.train()
 
         # Anneal AlignBlock temperature: linear decay from start to end
         t_start = cfg.model.align_temp_start
@@ -446,8 +413,6 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
                 raw_gn = nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
                 gn = raw_gn.item()
                 optimizer.step()
-                if not warmup_done:
-                    warmup_scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
 
@@ -498,6 +463,7 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
             log_weight_histograms(writer, _unwrap(model), epoch)
 
         # Validation
+        optimizer.eval()
         model.eval()
         val_losses = {"total": 0, "plcmse": 0}
         if cfg.loss.mag_l1_weight > 0:
@@ -615,15 +581,6 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
         for sc, values in scenario_stoi.items():
             add_scalar_with_help(writer, f"val/stoi_{sc}", np.mean(values), epoch)
 
-        # Step epoch scheduler (only after warmup)
-        if warmup_done:
-            if cfg.training.lr_scheduler == "plateau":
-                epoch_scheduler.step(val_losses["total"])
-            else:
-                epoch_scheduler.step()
-        if not warmup_done and (epoch + 1) >= cfg.training.warmup_epochs:
-            warmup_done = True
-
         # Build per-scenario metric summary
         metric_parts = [
             f"Epoch {epoch+1}: train_loss={epoch_losses['total']:.4f}, "
@@ -649,7 +606,7 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
         # Checkpointing
         if (epoch + 1) % cfg.training.checkpoint_every == 0:
             save_checkpoint(
-                model, optimizer, schedulers, epoch + 1,
+                model, optimizer, epoch + 1,
                 val_losses["total"],
                 ckpt_dir / f"epoch_{epoch+1:04d}.pt",
             )
@@ -678,7 +635,7 @@ def train(cfg, resume=None, dummy=False, overfit_real=False,
             best_val_loss = val_losses["total"]
             epochs_without_improvement = 0
             save_checkpoint(
-                model, optimizer, schedulers, epoch + 1,
+                model, optimizer, epoch + 1,
                 val_losses["total"],
                 ckpt_dir / "best.pt",
             )
@@ -704,11 +661,8 @@ if __name__ == "__main__":
     parser.add_argument("--dummy", action="store_true", help="Use dummy dataset for testing")
     parser.add_argument("--overfit-real", action="store_true",
                         help="Use FixedSynthDataset (real audio, controlled delays)")
-    parser.add_argument("--fresh-scheduler", action="store_true",
-                        help="Ignore saved scheduler state on resume (use when changing LR schedule)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     train(cfg, resume=args.resume, dummy=args.dummy,
-          overfit_real=args.overfit_real,
-          fresh_scheduler=args.fresh_scheduler)
+          overfit_real=args.overfit_real)

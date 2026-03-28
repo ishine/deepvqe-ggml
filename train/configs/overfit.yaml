@@ -39,12 +39,6 @@ training:
   early_stop_min_delta: 0.0
   delay_acc_min: 0.0        # disable gate
   erle_min_db: -100.0       # disable gate
-  lr_scheduler: cosine_restarts
-  lr_patience: 10
-  lr_factor: 0.5
-  lr_min: 1.0e-6
-  lr_cosine_t0: 100
-  lr_cosine_tmult: 2
 
 loss:
   # Pure reconstruction loss — no delay/entropy/energy supervision.

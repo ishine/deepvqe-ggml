@@ -31,12 +31,6 @@ training:
   early_stop_min_delta: 1.0e-4
   delay_acc_min: 0.5
   erle_min_db: 3.0
-  lr_scheduler: cosine_restarts
-  lr_patience: 10              # fallback if switched to plateau
-  lr_factor: 0.5
-  lr_min: 1.0e-6
-  lr_cosine_t0: 50
-  lr_cosine_tmult: 1
 
 loss:
   # Pure reconstruction loss — mag-L1 + time-L1 only.

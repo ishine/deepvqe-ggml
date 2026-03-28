@@ -44,12 +44,6 @@ class TrainingConfig:
     early_stop_min_delta: float = 1e-3
     delay_acc_min: float = 0.7
     erle_min_db: float = 3.0
-    lr_scheduler: str = "plateau"  # "plateau" or "cosine_restarts"
-    lr_patience: int = 5
-    lr_factor: float = 0.5
-    lr_min: float = 1e-6
-    lr_cosine_t0: int = 100
-    lr_cosine_tmult: int = 2
 
 
 @dataclass
