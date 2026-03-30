@@ -1,7 +1,7 @@
 """DeepVQE AEC training script.
 
 Features:
-- Schedule-Free AdamW optimizer (built-in warmup, no LR schedule)
+- Schedule-Free AdamW (default) or SOAP optimizer
 - Mixed precision (BF16 autocast, TF32 for remaining FP32 ops)
 - Gradient accumulation for large effective batch sizes
 - Gradient clipping
@@ -103,6 +103,34 @@ def compute_erle(mic_wav, enhanced_wav, clean_wav):
     return erle.mean()
 
 
+def create_optimizer(cfg, model_params, warmup_steps):
+    """Create optimizer based on config.
+
+    Returns (optimizer, scheduler).
+    Schedule-Free manages its own LR internally; SOAP needs an external warmup.
+    """
+    if cfg.training.optimizer == "soap":
+        from soap import SOAP
+        optimizer = SOAP(
+            model_params,
+            lr=cfg.training.lr,
+            weight_decay=cfg.training.weight_decay,
+            precondition_frequency=10,
+        )
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-6, total_iters=warmup_steps,
+        ) if warmup_steps > 0 else None
+        return optimizer, scheduler
+    elif cfg.training.optimizer == "schedulefree":
+        optimizer = schedulefree.AdamWScheduleFree(
+            model_params,
+            lr=cfg.training.lr,
+            weight_decay=cfg.training.weight_decay,
+            warmup_steps=warmup_steps,
+        )
+        return optimizer, None
+    else:
+        raise ValueError(f"Unknown optimizer: {cfg.training.optimizer!r}")
 
 
 def manage_checkpoints(ckpt_dir, keep_n):
@@ -225,14 +253,6 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
     # Loss
     criterion = DeepVQELoss.from_config(cfg).to(device)
 
-    # Optimizer (Schedule-Free AdamW — no LR schedule needed)
-    # warmup_steps computed after dataloader creation, set below
-    optimizer = schedulefree.AdamWScheduleFree(
-        model.parameters(),
-        lr=cfg.training.lr,
-        weight_decay=cfg.training.weight_decay,
-    )
-
     # Dataset
     if overfit_real:
         target_len = int(cfg.training.clip_length_sec * cfg.audio.sample_rate)
@@ -306,7 +326,11 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
 
     steps_per_epoch = len(train_loader) // cfg.training.grad_accum_steps
     warmup_steps = cfg.training.warmup_epochs * steps_per_epoch
-    optimizer.warmup_steps = warmup_steps
+    optimizer, scheduler = create_optimizer(
+        cfg, model.parameters(), warmup_steps,
+    )
+    print(f"Optimizer: {cfg.training.optimizer} "
+          f"(lr={cfg.training.lr}, warmup={warmup_steps} steps)")
 
     # AMP — BF16 on CUDA (no GradScaler needed), disabled on CPU
     use_amp = cfg.training.amp and device.type == "cuda"
@@ -320,11 +344,9 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
     start_epoch = 0
     best_val_loss = float("inf")
     if resume:
-        start_epoch = load_checkpoint(resume, model, optimizer)
-        # Restore best_val_loss from checkpoint so early stopping persists
-        ckpt = torch.load(resume, weights_only=False)
-        if "loss" in ckpt:
-            best_val_loss = ckpt["loss"]
+        start_epoch, saved_loss = load_checkpoint(resume, model, optimizer, scheduler)
+        if saved_loss is not None:
+            best_val_loss = saved_loss
             print(f"Resumed from epoch {start_epoch}, best_val_loss={best_val_loss:.4f}")
         else:
             print(f"Resumed from epoch {start_epoch}")
@@ -337,7 +359,8 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
 
     for epoch in range(start_epoch, cfg.training.epochs):
         model.train()
-        optimizer.train()
+        if isinstance(optimizer, schedulefree.AdamWScheduleFree):
+            optimizer.train()
 
         # Anneal AlignBlock temperature: linear decay from start to end
         t_start = cfg.model.align_temp_start
@@ -412,7 +435,18 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
             if (batch_idx + 1) % accum_steps == 0:
                 raw_gn = nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
                 gn = raw_gn.item()
+
+                # Bail on NaN gradients before corrupting optimizer state
+                if not torch.isfinite(raw_gn):
+                    print(f"\n  FATAL: NaN/Inf gradient norm at step {global_step}, "
+                          f"epoch {epoch+1}. Stopping.")
+                    optimizer.zero_grad()
+                    writer.close()
+                    return
+
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
 
@@ -463,7 +497,8 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
             log_weight_histograms(writer, _unwrap(model), epoch)
 
         # Validation
-        optimizer.eval()
+        if isinstance(optimizer, schedulefree.AdamWScheduleFree):
+            optimizer.eval()
         model.eval()
         val_losses = {"total": 0, "plcmse": 0}
         if cfg.loss.mag_l1_weight > 0:
@@ -609,6 +644,7 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                 model, optimizer, epoch + 1,
                 val_losses["total"],
                 ckpt_dir / f"epoch_{epoch+1:04d}.pt",
+                scheduler=scheduler,
             )
             manage_checkpoints(ckpt_dir, cfg.training.keep_checkpoints)
 
@@ -638,6 +674,7 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                 model, optimizer, epoch + 1,
                 val_losses["total"],
                 ckpt_dir / "best.pt",
+                scheduler=scheduler,
             )
             print(f"  New best val loss: {best_val_loss:.4f} "
                   f"(delay_acc={val_delay_acc:.1%}, erle={val_erle:+.1f}dB)")

@@ -37,6 +37,7 @@ class TrainingConfig:
     clip_length_sec: float = 3.0
     amp: bool = True
     grad_clip: float = 5.0
+    optimizer: str = "schedulefree"  # "schedulefree" or "soap"
     warmup_epochs: int = 5
     checkpoint_every: int = 5
     keep_checkpoints: int = 5

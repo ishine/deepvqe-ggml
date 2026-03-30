@@ -24,7 +24,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = DeepVQEAEC.from_config(cfg).to(device)
-    epoch = load_checkpoint("checkpoints/best.pt", model)
+    epoch, _ = load_checkpoint("checkpoints/best.pt", model)
     model.eval()
 
     if args.temperature is not None:

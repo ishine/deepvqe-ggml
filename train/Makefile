@@ -143,8 +143,12 @@ test-blocks: build ## Run block-level verification tests
 test-ccm: build ## Run CCM learning isolation tests
 	$(DOCKER_UTIL) $(IMAGE) python test_ccm_learning.py
 
+.PHONY: test-optim
+test-optim: build ## Run optimizer verification tests
+	$(DOCKER_UTIL) $(IMAGE) python test_optimizer.py
+
 .PHONY: tests
-tests: test-model test-data test-blocks test-ccm ## Run all unit tests
+tests: test-model test-data test-blocks test-ccm test-optim ## Run all unit tests
 
 # ── Data ─────────────────────────────────────────────────────────────────────
 

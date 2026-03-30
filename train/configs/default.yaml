@@ -18,7 +18,8 @@ training:
   batch_size: 32
   grad_accum_steps: 2
   num_workers: 12
-  lr: 3.0e-4
+  optimizer: soap            # "schedulefree" or "soap"
+  lr: 1.0e-3
   weight_decay: 5.0e-7
   epochs: 100
   clip_length_sec: 3.0

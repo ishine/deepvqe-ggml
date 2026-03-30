@@ -32,7 +32,7 @@ def run(cfg, checkpoint_path, output_dir, dummy=False, num_samples=5, sample_idx
 
     # Load model
     model = DeepVQEAEC.from_config(cfg).to(device)
-    epoch = load_checkpoint(checkpoint_path, model)
+    epoch, _ = load_checkpoint(checkpoint_path, model)
     model.eval()
     print(f"Loaded checkpoint from epoch {epoch}")
 

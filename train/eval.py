@@ -79,7 +79,7 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
 
     # Model
     model = DeepVQEAEC.from_config(cfg).to(device)
-    epoch = load_checkpoint(checkpoint_path, model)
+    epoch, _ = load_checkpoint(checkpoint_path, model)
     if device.type == "cuda":
         model = torch.compile(model)
     model.eval()

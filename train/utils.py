@@ -40,19 +40,20 @@ def delay_samples_to_frame(delay_samples, hop_length, dmax):
     return target_frames.clamp(0, dmax - 1)
 
 
-def save_checkpoint(model, optimizer, epoch, loss, path):
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": _unwrap(model).state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "loss": loss,
-        },
-        path,
-    )
+def save_checkpoint(model, optimizer, epoch, loss, path, scheduler=None):
+    data = {
+        "epoch": epoch,
+        "model_state_dict": _unwrap(model).state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss": loss,
+    }
+    if scheduler is not None:
+        data["scheduler_state_dict"] = scheduler.state_dict()
+    torch.save(data, path)
 
 
-def load_checkpoint(path, model, optimizer=None):
+def load_checkpoint(path, model, optimizer=None, scheduler=None):
+    """Load checkpoint, returning (epoch, loss)."""
     ckpt = torch.load(path, weights_only=False)
     state = ckpt["model_state_dict"]
     # Strip _orig_mod. prefix for backward compat with old checkpoints
@@ -60,4 +61,6 @@ def load_checkpoint(path, model, optimizer=None):
     _unwrap(model).load_state_dict(state)
     if optimizer and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    return ckpt["epoch"]
+    if scheduler and "scheduler_state_dict" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    return ckpt["epoch"], ckpt.get("loss")
