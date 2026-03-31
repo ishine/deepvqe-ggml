@@ -80,12 +80,10 @@ make test-ggml
 Pre-trained weights are available on Hugging Face:
 [richiejp/deepvqe-aec-gguf](https://huggingface.co/richiejp/deepvqe-aec-gguf).
 
-**Note:** The current checkpoint was trained on a small subset of the DNS5
-dataset on a single NVIDIA RTX 5070 (16 GB). It demonstrates end-to-end
-functionality but has not been trained to convergence on the full dataset. We
-are working on a larger-scale training run on Hugging Face infrastructure. If
-you would like to help with compute, data, or training expertise, please open
-an issue — contributions and support are very welcome!
+**Safety note:** Training data was filtered by DNSMOS perceived quality scores,
+which can misclassify distressed speech (e.g. screaming, crying) as noise. This
+model may attenuate or distort such signals and should not be relied upon for
+emergency call or safety-critical applications.
 
 To train your own model and export weights, see [train/](train/).
 
@@ -100,7 +98,7 @@ make -C train build
 make -C train test
 
 # Train on DNS5 data
-make -C train train-minimal
+make -C train train
 
 # Export trained checkpoint to GGUF
 make -C train export

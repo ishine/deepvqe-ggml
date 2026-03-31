@@ -168,21 +168,20 @@ real-time voice input with echo cancellation.
 | **Delay range** | dmax=32 frames (320 ms) |
 | **Format** | GGUF (F32) |
 
-## Training Status
+## Training
 
-**This is an early checkpoint** trained on a small subset of the DNS5 dataset
-on a single NVIDIA RTX 5070 (16 GB). It demonstrates that the architecture and
-inference pipeline work end-to-end, but it has not yet been trained to
-convergence on the full dataset.
+Trained on the full [DNS5 16 kHz dataset](https://huggingface.co/datasets/richiejp/dns5-16k)
+(~300K clean speech files after DNSMOS quality filtering, 64K noise, 60K impulse
+responses) on a single NVIDIA RTX 5070 (16 GB).
 
-We are working on a larger-scale training run on Hugging Face infrastructure.
-If you would like to help with compute, data, or training expertise, please
-open an issue on the [GitHub repo](https://github.com/richiejp/deepvqe-ggml)
-— contributions and support are very welcome!
+**Safety note:** Training data was filtered by DNSMOS perceived quality scores,
+which can misclassify distressed speech (e.g. screaming, crying) as noise. This
+model may therefore attenuate or distort such signals and **should not be relied
+upon for emergency call or safety-critical applications**.
 
 ### Data
 
-- [DNS5](https://github.com/microsoft/DNS-Challenge) (Microsoft, CC BY 4.0) — minimal subset
+- [DNS5](https://github.com/microsoft/DNS-Challenge) (Microsoft, CC BY 4.0)
 - [ICASSP 2022 AEC Challenge](https://github.com/microsoft/AEC-Challenge) — echo scenarios
 
 See [deepvqe-ggml](https://github.com/richiejp/deepvqe-ggml) for training
