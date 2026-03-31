@@ -27,7 +27,7 @@ from collections import defaultdict
 from data.dataset import AECDataset, DummyAECDataset, FixedSynthDataset
 from src.config import load_config
 from src.losses import DeepVQELoss, mask_magnitude_regularizer
-from src.metrics import compute_pesq, compute_stoi
+from src.metrics import compute_aecmos, compute_dnsmos, compute_pesq, compute_stoi
 from src.model import DeepVQEAEC
 from src.stft import istft
 from src.viz import (
@@ -520,8 +520,15 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
         scenario_erle = defaultdict(list)
         scenario_pesq = defaultdict(list)
         scenario_stoi = defaultdict(list)
+        scenario_dnsmos_ovrl = defaultdict(list)
+        scenario_echo_mos = defaultdict(list)
+        scenario_deg_mos = defaultdict(list)
         pesq_count = 0
+        dnsmos_count = 0
+        aecmos_count = 0
         pesq_budget = cfg.eval.pesq_subset
+        dnsmos_budget = cfg.eval.dnsmos_subset
+        aecmos_budget = cfg.eval.aecmos_subset
         # Collect diverse samples for TensorBoard: pick random batches/indices
         n_tb_samples = min(cfg.eval.audio_samples, len(val_loader))
         tb_batch_indices = set(random.sample(range(len(val_loader)), n_tb_samples))
@@ -574,9 +581,17 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                     ).item()
                     scenario_erle[sc].append(erle_i)
 
+                    # Convert to numpy once for all CPU metrics
+                    need_np = (
+                        (sc == "double_talk" and pesq_count < pesq_budget)
+                        or dnsmos_count < dnsmos_budget
+                        or aecmos_count < aecmos_budget
+                    )
+                    if need_np:
+                        enh_np = enh_wav[i].float().cpu().numpy()
+
                     # PESQ/STOI for double-talk only (budget-limited)
                     if sc == "double_talk" and pesq_count < pesq_budget:
-                        enh_np = enh_wav[i].float().cpu().numpy()
                         cln_np = clean_wav[i].float().cpu().numpy()
                         pesq_score = compute_pesq(cln_np, enh_np, sr=sr)
                         stoi_score = compute_stoi(cln_np, enh_np, sr=sr)
@@ -585,6 +600,23 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                         if stoi_score is not None:
                             scenario_stoi[sc].append(stoi_score)
                         pesq_count += 1
+
+                    # DNSMOS (budget-limited, all scenarios)
+                    if dnsmos_count < dnsmos_budget:
+                        dnsmos = compute_dnsmos(enh_np)
+                        if dnsmos is not None:
+                            scenario_dnsmos_ovrl[sc].append(dnsmos["OVRL"])
+                        dnsmos_count += 1
+
+                    # AECMOS (budget-limited, all scenarios)
+                    if aecmos_count < aecmos_budget:
+                        mic_np = mic_wav[i].float().cpu().numpy()
+                        ref_np = batch["ref_wav"][i].float().numpy()
+                        aecmos = compute_aecmos(ref_np, mic_np, enh_np)
+                        if aecmos is not None:
+                            scenario_echo_mos[sc].append(aecmos["echo_mos"])
+                            scenario_deg_mos[sc].append(aecmos["deg_mos"])
+                        aecmos_count += 1
 
                 for k in val_losses:
                     val_losses[k] += components[k].item()
@@ -615,6 +647,23 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
             add_scalar_with_help(writer, f"val/pesq_{sc}", np.mean(values), epoch)
         for sc, values in scenario_stoi.items():
             add_scalar_with_help(writer, f"val/stoi_{sc}", np.mean(values), epoch)
+        # DNSMOS
+        for sc, values in scenario_dnsmos_ovrl.items():
+            add_scalar_with_help(writer, f"val/dnsmos_ovrl_{sc}", np.mean(values), epoch)
+        all_dnsmos = [v for vals in scenario_dnsmos_ovrl.values() for v in vals]
+        if all_dnsmos:
+            add_scalar_with_help(writer, "val/dnsmos_ovrl", np.mean(all_dnsmos), epoch)
+        # AECMOS
+        for sc, values in scenario_echo_mos.items():
+            add_scalar_with_help(writer, f"val/echo_mos_{sc}", np.mean(values), epoch)
+        for sc, values in scenario_deg_mos.items():
+            add_scalar_with_help(writer, f"val/deg_mos_{sc}", np.mean(values), epoch)
+        all_echo_mos = [v for vals in scenario_echo_mos.values() for v in vals]
+        if all_echo_mos:
+            add_scalar_with_help(writer, "val/echo_mos", np.mean(all_echo_mos), epoch)
+        all_deg_mos = [v for vals in scenario_deg_mos.values() for v in vals]
+        if all_deg_mos:
+            add_scalar_with_help(writer, "val/deg_mos", np.mean(all_deg_mos), epoch)
 
         # Build per-scenario metric summary
         metric_parts = [
@@ -629,6 +678,12 @@ def train(cfg, resume=None, dummy=False, overfit_real=False):
                 part += f", pesq={np.mean(scenario_pesq[sc]):.2f}"
             if sc in scenario_stoi and scenario_stoi[sc]:
                 part += f", stoi={np.mean(scenario_stoi[sc]):.3f}"
+            if sc in scenario_echo_mos and scenario_echo_mos[sc]:
+                part += f", echo_mos={np.mean(scenario_echo_mos[sc]):.2f}"
+            if sc in scenario_deg_mos and scenario_deg_mos[sc]:
+                part += f", deg_mos={np.mean(scenario_deg_mos[sc]):.2f}"
+            if sc in scenario_dnsmos_ovrl and scenario_dnsmos_ovrl[sc]:
+                part += f", dnsmos={np.mean(scenario_dnsmos_ovrl[sc]):.2f}"
             metric_parts.append(part)
         print("\n".join(metric_parts))
 

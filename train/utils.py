@@ -14,6 +14,7 @@ def collate_fn(batch):
     ref_stft = torch.stack([b["ref_stft"] for b in batch])
     clean_stft = torch.stack([b["clean_stft"] for b in batch])
     mic_wav = torch.stack([b["mic_wav"] for b in batch])
+    ref_wav = torch.stack([b["ref_wav"] for b in batch])
     clean_wav = torch.stack([b["clean_wav"] for b in batch])
     delay_samples = torch.tensor([b["delay_samples"] for b in batch], dtype=torch.long)
     metadata = [b["metadata"] for b in batch]
@@ -22,6 +23,7 @@ def collate_fn(batch):
         "ref_stft": ref_stft,
         "clean_stft": clean_stft,
         "mic_wav": mic_wav,
+        "ref_wav": ref_wav,
         "clean_wav": clean_wav,
         "delay_samples": delay_samples,
         "metadata": metadata,

@@ -7,6 +7,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 \
 # Install only packages not already in the NGC container
 # (numpy, scipy, tensorboard, pyyaml, matplotlib, tqdm are pre-installed)
 RUN pip install --no-cache-dir einops pesq pystoi soundfile gguf \
-    huggingface-hub librosa schedulefree
+    huggingface-hub librosa schedulefree onnxruntime
 
 WORKDIR /workspace/deepvqe

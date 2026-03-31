@@ -89,6 +89,8 @@ class DataConfig:
 @dataclass
 class EvalConfig:
     pesq_subset: int = 200
+    dnsmos_subset: int = 100
+    aecmos_subset: int = 100
     audio_samples: int = 10
 
 

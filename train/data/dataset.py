@@ -202,6 +202,7 @@ class AECDataset(Dataset):
             "ref_stft": ref_stft,
             "clean_stft": clean_stft,
             "mic_wav": mic_t.squeeze(0),
+            "ref_wav": ref_t.squeeze(0),
             "clean_wav": clean_t.squeeze(0),
             "delay_samples": metadata["delay_samples"],
             "metadata": metadata,
@@ -298,6 +299,7 @@ class DummyAECDataset(Dataset):
             "ref_stft": ref_stft,
             "clean_stft": clean_stft,
             "mic_wav": mic_t.squeeze(0),
+            "ref_wav": ref_t.squeeze(0),
             "clean_wav": clean_t.squeeze(0),
             "delay_samples": delay_samples,
             "metadata": {
@@ -401,6 +403,7 @@ class FixedSynthDataset(Dataset):
                 "ref_stft": stft(ref_t, n_fft, hop_length).squeeze(0),
                 "clean_stft": stft(clean_t, n_fft, hop_length).squeeze(0),
                 "mic_wav": mic_t.squeeze(0),
+                "ref_wav": ref_t.squeeze(0),
                 "clean_wav": clean_t.squeeze(0),
                 "delay_samples": delay_samples,
                 "metadata": {

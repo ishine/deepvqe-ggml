@@ -127,9 +127,10 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
             mic_np = mic_wav[0].cpu().numpy()
             enh_np = enh_wav[0].cpu().numpy()
             clean_np = clean_wav[0].cpu().numpy()
+            ref_np = sample["ref_wav"].numpy() if "ref_wav" in sample else None
 
             # Compute metrics
-            metrics = evaluate_sample(mic_np, enh_np, clean_np, sr)
+            metrics = evaluate_sample(mic_np, enh_np, clean_np, sr, ref_wav=ref_np)
             metrics["sample_idx"] = i
             if "delay_samples" in sample.get("metadata", {}):
                 metrics["true_delay"] = sample["metadata"]["delay_samples"]
@@ -180,6 +181,19 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
     if stoi_values:
         print(f"STOI:        {np.mean(stoi_values):.3f} (std={np.std(stoi_values):.3f})")
 
+    dnsmos_ovrl = [m["dnsmos_ovrl"] for m in all_metrics if "dnsmos_ovrl" in m]
+    if dnsmos_ovrl:
+        print(f"DNSMOS OVRL: {np.mean(dnsmos_ovrl):.3f} (std={np.std(dnsmos_ovrl):.3f})")
+        dnsmos_sig = [m["dnsmos_sig"] for m in all_metrics if "dnsmos_sig" in m]
+        dnsmos_bak = [m["dnsmos_bak"] for m in all_metrics if "dnsmos_bak" in m]
+        print(f"DNSMOS SIG:  {np.mean(dnsmos_sig):.3f}  BAK: {np.mean(dnsmos_bak):.3f}")
+
+    echo_mos = [m["echo_mos"] for m in all_metrics if "echo_mos" in m]
+    deg_mos = [m["deg_mos"] for m in all_metrics if "deg_mos" in m]
+    if echo_mos:
+        print(f"AECMOS echo: {np.mean(echo_mos):.3f} (std={np.std(echo_mos):.3f})")
+        print(f"AECMOS deg:  {np.mean(deg_mos):.3f} (std={np.std(deg_mos):.3f})")
+
     print(f"\nOutput saved to: {out_dir}")
 
     # Save summary
@@ -195,6 +209,11 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
         summary["pesq_mean"] = float(np.mean(pesq_values))
     if stoi_values:
         summary["stoi_mean"] = float(np.mean(stoi_values))
+    if dnsmos_ovrl:
+        summary["dnsmos_ovrl_mean"] = float(np.mean(dnsmos_ovrl))
+    if echo_mos:
+        summary["echo_mos_mean"] = float(np.mean(echo_mos))
+        summary["deg_mos_mean"] = float(np.mean(deg_mos))
 
     np.save(out_dir / "summary.npy", summary)
     return summary

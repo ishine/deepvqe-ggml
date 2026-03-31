@@ -66,6 +66,8 @@ data:
 
 eval:
   pesq_subset: 200
+  dnsmos_subset: 100
+  aecmos_subset: 100
   audio_samples: 10
 
 paths:
