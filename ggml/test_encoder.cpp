@@ -188,21 +188,10 @@ int main(int argc, char** argv) {
         struct gguf_context* gctx = gguf_init_from_file(gguf_path, gparams);
         if (!gctx) { fprintf(stderr, "Failed to load GGUF: %s\n", gguf_path); return 1; }
 
-        auto load_tensor = [&](const std::string& name) -> NpyArray {
-            struct ggml_tensor* t = ggml_get_tensor(ggml_ctx, name.c_str());
-            if (!t) { fprintf(stderr, "Missing tensor: %s\n", name.c_str()); return {}; }
-            NpyArray arr;
-            int nd = ggml_n_dims(t);
-            for (int d = nd - 1; d >= 0; d--) arr.shape.push_back(t->ne[d]);
-            arr.data.resize(arr.numel());
-            std::memcpy(arr.data.data(), t->data, arr.numel() * sizeof(float));
-            return arr;
-        };
-
-        conv_w = load_tensor(block_name + ".conv.weight");
-        conv_b = load_tensor(block_name + ".conv.bias");
-        res_conv_w = load_tensor(block_name + ".resblock.conv.weight");
-        res_conv_b = load_tensor(block_name + ".resblock.conv.bias");
+        conv_w = load_tensor_from_ggml(ggml_ctx, block_name + ".conv.weight", gctx);
+        conv_b = load_tensor_from_ggml(ggml_ctx, block_name + ".conv.bias", gctx);
+        res_conv_w = load_tensor_from_ggml(ggml_ctx, block_name + ".resblock.conv.weight", gctx);
+        res_conv_b = load_tensor_from_ggml(ggml_ctx, block_name + ".resblock.conv.bias", gctx);
 
         printf("Conv weight shape:");
         for (auto s : conv_w.shape) printf(" %lld", (long long)s);

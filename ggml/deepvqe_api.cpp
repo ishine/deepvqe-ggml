@@ -27,6 +27,7 @@ struct deepvqe_ctx {
     deepvqe_model model;
     std::string last_error;
     std::vector<float> window;  // sqrt-Hann, length n_fft
+    deepvqe_stream_state stream;
 };
 
 // ── FFT (radix-2 Cooley-Tukey, in-place, interleaved complex) ────────────────
@@ -176,6 +177,8 @@ DEEPVQE_API uintptr_t deepvqe_new(const char* model_path) {
     ctx->window.resize(n_fft);
     make_sqrt_hann(ctx->window.data(), n_fft);
 
+    init_stream_state(ctx->stream, ctx->model);
+
     return reinterpret_cast<uintptr_t>(ctx);
 }
 
@@ -232,29 +235,33 @@ DEEPVQE_API int deepvqe_process_f32(uintptr_t handle,
     return 0;
 }
 
+// ── s16/f32 conversion helpers ────────────────────────────────────────────
+
+static void s16_to_f32(const int16_t* in, float* out, int n) {
+    const float scale = 1.0f / 32768.0f;
+    for (int i = 0; i < n; i++) out[i] = in[i] * scale;
+}
+
+static void f32_to_s16(const float* in, int16_t* out, int n) {
+    for (int i = 0; i < n; i++) {
+        float v = std::max(-32768.0f, std::min(32767.0f, in[i] * 32768.0f));
+        out[i] = (int16_t)v;
+    }
+}
+
 DEEPVQE_API int deepvqe_process_s16(uintptr_t handle,
                                      const int16_t* mic, const int16_t* ref,
                                      int n_samples, int16_t* out) {
     if (!handle) return -1;
 
-    // Convert s16 -> f32
     std::vector<float> mic_f(n_samples), ref_f(n_samples), out_f(n_samples);
-    const float scale_in = 1.0f / 32768.0f;
-    for (int i = 0; i < n_samples; i++) {
-        mic_f[i] = mic[i] * scale_in;
-        ref_f[i] = ref[i] * scale_in;
-    }
+    s16_to_f32(mic, mic_f.data(), n_samples);
+    s16_to_f32(ref, ref_f.data(), n_samples);
 
     int ret = deepvqe_process_f32(handle, mic_f.data(), ref_f.data(), n_samples, out_f.data());
     if (ret != 0) return ret;
 
-    // Convert f32 -> s16 with clamping
-    for (int i = 0; i < n_samples; i++) {
-        float v = out_f[i] * 32768.0f;
-        v = std::max(-32768.0f, std::min(32767.0f, v));
-        out[i] = (int16_t)v;
-    }
-
+    f32_to_s16(out_f.data(), out, n_samples);
     return 0;
 }
 
@@ -276,6 +283,140 @@ DEEPVQE_API int deepvqe_hop_length(uintptr_t handle) {
 DEEPVQE_API int deepvqe_fft_size(uintptr_t handle) {
     if (!handle) return 0;
     return reinterpret_cast<deepvqe_ctx*>(handle)->model.hparams.n_fft;
+}
+
+// ── Streaming STFT/iSTFT ─────────────────────────────────────────────────
+
+// Single-frame STFT: prev_hop (256) + new_hop (256) → window + FFT → (n_freq, 2)
+static void stft_frame(const float* new_hop, const float* prev_hop,
+                       const float* window, int n_fft,
+                       float* out, int n_freq) {
+    std::vector<float> frame(2 * n_fft, 0.0f);
+    for (int i = 0; i < n_fft; i++) {
+        // First half from prev_hop, second half from new_hop
+        float sample = (i < n_fft / 2) ? prev_hop[i] : new_hop[i - n_fft / 2];
+        frame[2 * i] = sample * window[i];
+    }
+    fft_radix2(frame.data(), n_fft, false);
+    // Store positive frequencies: (n_freq, 2) interleaved
+    for (int f = 0; f < n_freq; f++) {
+        out[f * 2 + 0] = frame[2 * f];
+        out[f * 2 + 1] = frame[2 * f + 1];
+    }
+}
+
+// Single-frame iSTFT: IFFT + window + overlap-add → hop_length output samples
+static void istft_frame(const float* enhanced_stft, float* prev_buf,
+                        const float* window, int n_fft, int hop,
+                        float* out) {
+    int n_freq = n_fft / 2 + 1;
+    std::vector<float> frame(2 * n_fft, 0.0f);
+
+    // Reconstruct full spectrum from half spectrum
+    for (int f = 0; f < n_freq; f++) {
+        frame[2 * f]     = enhanced_stft[f * 2 + 0];
+        frame[2 * f + 1] = enhanced_stft[f * 2 + 1];
+    }
+    for (int f = n_freq; f < n_fft; f++) {
+        int mirror = n_fft - f;
+        frame[2 * f]     =  frame[2 * mirror];
+        frame[2 * f + 1] = -frame[2 * mirror + 1];
+    }
+
+    // IFFT
+    fft_radix2(frame.data(), n_fft, true);
+
+    // Synthesis window + overlap-add
+    // prev_buf holds the last n_fft samples of accumulated overlap
+    // Output the first hop samples (completed region)
+    for (int i = 0; i < n_fft; i++)
+        prev_buf[i] += frame[2 * i] * window[i];
+
+    // sqrt-Hann with 50% overlap: COLA = 1.0, no normalization needed
+    std::memcpy(out, prev_buf, hop * sizeof(float));
+
+    // Shift: move second half to first, zero second half
+    std::memmove(prev_buf, prev_buf + hop, hop * sizeof(float));
+    std::memset(prev_buf + hop, 0, hop * sizeof(float));
+}
+
+// ── Streaming C API ──────────────────────────────────────────────────────
+
+DEEPVQE_API int deepvqe_process_frame_f32(uintptr_t handle,
+                                           const float* mic, const float* ref,
+                                           int hop_samples, float* out) {
+    if (!handle) return -1;
+    auto* ctx = reinterpret_cast<deepvqe_ctx*>(handle);
+    ctx->last_error.clear();
+
+    auto& hp = ctx->model.hparams;
+    if (hop_samples != hp.hop_length) {
+        ctx->last_error = "hop_samples must be " + std::to_string(hp.hop_length);
+        return -2;
+    }
+
+    auto& st = ctx->stream;
+    int n_fft = hp.n_fft;
+    int hop = hp.hop_length;
+    int n_freq = n_fft / 2 + 1;
+
+    // First call: output zeros (need 2 hops for first valid STFT frame)
+    if (st.frame_count == 0) {
+        std::memcpy(st.stft_prev_mic.data(), mic, hop * sizeof(float));
+        std::memcpy(st.stft_prev_ref.data(), ref, hop * sizeof(float));
+        std::memset(out, 0, hop * sizeof(float));
+        st.frame_count = 1;
+        return 0;
+    }
+
+    // Single-frame STFT for mic and ref
+    std::vector<float> mic_stft(n_freq * 2), ref_stft(n_freq * 2);
+    stft_frame(mic, st.stft_prev_mic.data(), ctx->window.data(),
+               n_fft, mic_stft.data(), n_freq);
+    stft_frame(ref, st.stft_prev_ref.data(), ctx->window.data(),
+               n_fft, ref_stft.data(), n_freq);
+
+    // Update prev hop buffers
+    std::memcpy(st.stft_prev_mic.data(), mic, hop * sizeof(float));
+    std::memcpy(st.stft_prev_ref.data(), ref, hop * sizeof(float));
+
+    // Forward pass (one frame)
+    std::vector<float> enhanced_stft(n_freq * 2);
+    try {
+        forward_frame(mic_stft.data(), ref_stft.data(),
+                      ctx->model, st, enhanced_stft.data());
+    } catch (const std::exception& e) {
+        ctx->last_error = std::string("Forward pass failed: ") + e.what();
+        return -3;
+    }
+
+    // Single-frame iSTFT → hop output samples
+    istft_frame(enhanced_stft.data(), st.istft_prev.data(),
+                ctx->window.data(), n_fft, hop, out);
+    return 0;
+}
+
+DEEPVQE_API int deepvqe_process_frame_s16(uintptr_t handle,
+                                           const int16_t* mic, const int16_t* ref,
+                                           int hop_samples, int16_t* out) {
+    if (!handle) return -1;
+
+    std::vector<float> mic_f(hop_samples), ref_f(hop_samples), out_f(hop_samples);
+    s16_to_f32(mic, mic_f.data(), hop_samples);
+    s16_to_f32(ref, ref_f.data(), hop_samples);
+
+    int ret = deepvqe_process_frame_f32(handle, mic_f.data(), ref_f.data(),
+                                         hop_samples, out_f.data());
+    if (ret != 0) return ret;
+
+    f32_to_s16(out_f.data(), out, hop_samples);
+    return 0;
+}
+
+DEEPVQE_API void deepvqe_reset(uintptr_t handle) {
+    if (!handle) return;
+    auto* ctx = reinterpret_cast<deepvqe_ctx*>(handle);
+    reset_stream_state(ctx->stream);
 }
 
 } // extern "C"

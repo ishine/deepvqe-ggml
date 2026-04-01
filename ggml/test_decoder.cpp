@@ -171,28 +171,17 @@ int main(int argc, char** argv) {
     struct gguf_context* gctx = gguf_init_from_file(gguf_path, gparams);
     if (!gctx) { fprintf(stderr, "Failed to load GGUF\n"); return 1; }
 
-    auto load_tensor = [&](const std::string& name) -> NpyArray {
-        struct ggml_tensor* t = ggml_get_tensor(ggml_ctx, name.c_str());
-        if (!t) { fprintf(stderr, "Missing tensor: %s\n", name.c_str()); return {}; }
-        NpyArray arr;
-        int nd = ggml_n_dims(t);
-        for (int d = nd - 1; d >= 0; d--) arr.shape.push_back(t->ne[d]);
-        arr.data.resize(arr.numel());
-        std::memcpy(arr.data.data(), t->data, arr.numel() * sizeof(float));
-        return arr;
-    };
-
-    NpyArray skip_w = load_tensor(block_name + ".skip_conv.weight");
-    NpyArray skip_b = load_tensor(block_name + ".skip_conv.bias");
-    NpyArray res_conv_w = load_tensor(block_name + ".resblock.conv.weight");
-    NpyArray res_conv_b = load_tensor(block_name + ".resblock.conv.bias");
-    NpyArray deconv_w = load_tensor(block_name + ".deconv.conv.weight");
-    NpyArray deconv_b = load_tensor(block_name + ".deconv.conv.bias");
+    NpyArray skip_w = load_tensor_from_ggml(ggml_ctx, block_name + ".skip_conv.weight", gctx);
+    NpyArray skip_b = load_tensor_from_ggml(ggml_ctx, block_name + ".skip_conv.bias", gctx);
+    NpyArray res_conv_w = load_tensor_from_ggml(ggml_ctx, block_name + ".resblock.conv.weight", gctx);
+    NpyArray res_conv_b = load_tensor_from_ggml(ggml_ctx, block_name + ".resblock.conv.bias", gctx);
+    NpyArray deconv_w = load_tensor_from_ggml(ggml_ctx, block_name + ".deconv.conv.weight", gctx);
+    NpyArray deconv_b = load_tensor_from_ggml(ggml_ctx, block_name + ".deconv.conv.bias", gctx);
 
     NpyArray bn_scale, bn_bias;
     if (!is_last) {
-        bn_scale = load_tensor(block_name + ".bn.scale");
-        bn_bias = load_tensor(block_name + ".bn.bias");
+        bn_scale = load_tensor_from_ggml(ggml_ctx, block_name + ".bn.scale", gctx);
+        bn_bias = load_tensor_from_ggml(ggml_ctx, block_name + ".bn.bias", gctx);
     }
 
     int C_out_deconv = (int)deconv_w.dim(0) / 2;  // Conv2d output = C_out * 2

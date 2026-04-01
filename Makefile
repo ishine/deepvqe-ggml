@@ -38,6 +38,17 @@ test-ggml: build-ggml ## Run all GGML block tests against PyTorch intermediates
 	ggml/build/test_align --gguf deepvqe.gguf --input-mic intermediates/blocks/align_input_0.npy --input-ref intermediates/blocks/align_input_1.npy --expected intermediates/blocks/align_output.npy
 	@echo "=== All block tests passed ==="
 
+.PHONY: test-quantize
+test-quantize: build-ggml ## Compare F32 vs Q8_0 quantized model outputs
+	ggml/build/test_quantize \
+		--f32 deepvqe.gguf --q8 deepvqe_q8.gguf \
+		--input-npy intermediates/pytorch/mic_stft.npy intermediates/pytorch/ref_stft.npy
+
+.PHONY: test-streaming
+test-streaming: build-ggml ## Compare batch vs streaming frame-by-frame outputs
+	ggml/build/test_streaming deepvqe.gguf \
+		--input-npy intermediates/blocks/input_mic_stft.npy intermediates/blocks/input_ref_stft.npy
+
 # ── Training delegation ─────────────────────────────────────────────────────
 
 .PHONY: build-docker

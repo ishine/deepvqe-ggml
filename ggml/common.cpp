@@ -8,6 +8,9 @@
 
 #include "common.h"
 
+#include "ggml.h"
+#include "gguf.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -166,6 +169,64 @@ void npy_save(const std::string& path, const float* data,
     f.write(reinterpret_cast<char*>(&header_len), 2);
     f.write(dict.data(), dict.size());
     f.write(reinterpret_cast<const char*>(data), numel * sizeof(float));
+}
+
+// ── GGUF tensor loading ────────────────────────────────────────────────────
+
+NpyArray load_tensor_from_ggml(struct ggml_context* ctx,
+                               const std::string& name,
+                               struct gguf_context* gctx,
+                               bool verbose) {
+    struct ggml_tensor* t = ggml_get_tensor(ctx, name.c_str());
+    if (!t) {
+        fprintf(stderr, "Missing tensor: %s\n", name.c_str());
+        return {};
+    }
+
+    NpyArray arr;
+    int nd = ggml_n_dims(t);
+    for (int d = nd - 1; d >= 0; d--)
+        arr.shape.push_back(t->ne[d]);
+
+    int64_t n = ggml_nelements(t);
+    arr.data.resize(n);
+
+    if (t->type == GGML_TYPE_F32) {
+        std::memcpy(arr.data.data(), t->data, n * sizeof(float));
+    } else {
+        const auto* traits = ggml_get_type_traits(t->type);
+        if (traits && traits->to_float) {
+            traits->to_float(t->data, arr.data.data(), n);
+            if (verbose)
+                printf("  Dequantized %s (%s -> F32, %lld elements)\n",
+                       name.c_str(), ggml_type_name(t->type), (long long)n);
+        } else {
+            fprintf(stderr, "Unsupported tensor type for %s: %s\n",
+                    name.c_str(), ggml_type_name(t->type));
+            return {};
+        }
+    }
+
+    // Quantized tensors may have been flattened to 1D for block-size
+    // alignment.  Restore original shape from GGUF metadata if present.
+    if (gctx) {
+        char key[256];
+        snprintf(key, sizeof(key), "deepvqe.shape.%s.ndim", name.c_str());
+        int ndim_idx = gguf_find_key(gctx, key);
+        if (ndim_idx >= 0) {
+            int ndim = (int)gguf_get_val_u32(gctx, ndim_idx);
+            arr.shape.clear();
+            for (int d = 0; d < ndim; d++) {
+                snprintf(key, sizeof(key), "deepvqe.shape.%s.%d",
+                         name.c_str(), d);
+                int d_idx = gguf_find_key(gctx, key);
+                if (d_idx >= 0)
+                    arr.shape.push_back((int64_t)gguf_get_val_u32(gctx, d_idx));
+            }
+        }
+    }
+
+    return arr;
 }
 
 // ── Comparison ──────────────────────────────────────────────────────────────

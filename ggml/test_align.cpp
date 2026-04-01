@@ -146,23 +146,12 @@ int main(int argc, char** argv) {
     int ah_idx = gguf_find_key(gctx, "deepvqe.align_hidden");
     int H = ah_idx >= 0 ? (int)gguf_get_val_u32(gctx, ah_idx) : 32;
 
-    auto load_tensor = [&](const std::string& name) -> NpyArray {
-        struct ggml_tensor* t = ggml_get_tensor(ggml_ctx, name.c_str());
-        if (!t) { fprintf(stderr, "Missing tensor: %s\n", name.c_str()); return {}; }
-        NpyArray arr;
-        int nd = ggml_n_dims(t);
-        for (int d = nd - 1; d >= 0; d--) arr.shape.push_back(t->ne[d]);
-        arr.data.resize(arr.numel());
-        std::memcpy(arr.data.data(), t->data, arr.numel() * sizeof(float));
-        return arr;
-    };
-
-    NpyArray pconv_mic_w = load_tensor("align.pconv_mic.weight");
-    NpyArray pconv_mic_b = load_tensor("align.pconv_mic.bias");
-    NpyArray pconv_ref_w = load_tensor("align.pconv_ref.weight");
-    NpyArray pconv_ref_b = load_tensor("align.pconv_ref.bias");
-    NpyArray smooth_w = load_tensor("align.conv.1.weight");
-    NpyArray smooth_b = load_tensor("align.conv.1.bias");
+    NpyArray pconv_mic_w = load_tensor_from_ggml(ggml_ctx, "align.pconv_mic.weight", gctx);
+    NpyArray pconv_mic_b = load_tensor_from_ggml(ggml_ctx, "align.pconv_mic.bias", gctx);
+    NpyArray pconv_ref_w = load_tensor_from_ggml(ggml_ctx, "align.pconv_ref.weight", gctx);
+    NpyArray pconv_ref_b = load_tensor_from_ggml(ggml_ctx, "align.pconv_ref.bias", gctx);
+    NpyArray smooth_w = load_tensor_from_ggml(ggml_ctx, "align.conv.1.weight", gctx);
+    NpyArray smooth_b = load_tensor_from_ggml(ggml_ctx, "align.conv.1.bias", gctx);
 
     gguf_free(gctx);
     if (ggml_ctx) ggml_free(ggml_ctx);

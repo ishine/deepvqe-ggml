@@ -34,6 +34,20 @@ inline void npy_save(const std::string& path, const NpyArray& arr) {
     npy_save(path, arr.data.data(), arr.shape);
 }
 
+// ── GGUF tensor loading ────────────────────────────────────────────────────
+
+struct ggml_context;  // forward decl — avoid pulling in ggml.h
+struct gguf_context;
+
+/// Load tensor from ggml context, dequantizing quantized types to float32.
+/// If gctx is non-null, restores original shape from GGUF metadata
+/// (quantized conv weights are stored flattened to 1D).
+/// Returns empty NpyArray on failure.
+NpyArray load_tensor_from_ggml(struct ggml_context* ctx,
+                               const std::string& name,
+                               struct gguf_context* gctx = nullptr,
+                               bool verbose = false);
+
 // ── Comparison ──────────────────────────────────────────────────────────────
 
 /// Maximum absolute difference between two arrays.

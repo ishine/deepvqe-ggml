@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 
 import gguf
+from gguf.constants import GGMLQuantizationType
+from gguf.quants import quantize as gguf_quantize
 
 from src.config import load_config
 from src.model import DeepVQEAEC
@@ -35,6 +37,25 @@ class _ChannelAffine(nn.Module):
 
     def forward(self, x):
         return x * self.scale[None, :, None, None] + self.bias[None, :, None, None]
+
+
+def should_quantize(name: str) -> bool:
+    """Decide if a tensor should be Q8_0 quantized.
+
+    Keep FP32: biases, ChannelAffine (bn.scale/bn.bias), AlignBlock, dec1.
+    Quantize: encoder/decoder conv weights, bottleneck GRU/FC weights.
+    """
+    if name.endswith(".bias"):
+        return False
+    if ".bn." in name:
+        return False
+    if name.startswith("align."):
+        return False
+    if name.startswith("dec1."):
+        return False
+    if name.endswith(".weight") or "weight_ih" in name or "weight_hh" in name:
+        return True
+    return False
 
 
 def fold_bn_into_conv(conv: nn.Conv2d, bn: nn.BatchNorm2d) -> nn.Conv2d:
@@ -138,7 +159,8 @@ def verify_bn_folding(original_model, folded_model, device="cpu"):
         return max_err
 
 
-def export_gguf(model: DeepVQEAEC, cfg, output_path: str, fold_bn=True):
+def export_gguf(model: DeepVQEAEC, cfg, output_path: str, fold_bn=True,
+                quantize=False):
     """Export model to GGUF format.
 
     Args:
@@ -146,6 +168,7 @@ def export_gguf(model: DeepVQEAEC, cfg, output_path: str, fold_bn=True):
         cfg: Config object
         output_path: Output .gguf file path
         fold_bn: Whether to fold BatchNorm into Conv2d
+        quantize: Whether to apply Q8_0 quantization to robust layers
     """
     model.eval()
 
@@ -171,6 +194,7 @@ def export_gguf(model: DeepVQEAEC, cfg, output_path: str, fold_bn=True):
     writer.add_float32("deepvqe.power_law_c", cfg.model.power_law_c)
     writer.add_uint32("deepvqe.align_hidden", cfg.model.align_hidden)
     writer.add_bool("deepvqe.bn_folded", fold_bn)
+    writer.add_bool("deepvqe.quantized", quantize)
 
     # Channel configs as arrays
     for i, ch in enumerate(cfg.model.mic_channels):
@@ -185,6 +209,7 @@ def export_gguf(model: DeepVQEAEC, cfg, output_path: str, fold_bn=True):
     state_dict = export_model.state_dict()
     n_skipped = 0
     n_exported = 0
+    n_quantized = 0
 
     for name, tensor in state_dict.items():
         # Skip Identity (folded BN) remnants and non-parameter buffers
@@ -193,23 +218,43 @@ def export_gguf(model: DeepVQEAEC, cfg, output_path: str, fold_bn=True):
             n_skipped += 1
             continue
 
-        # Skip folded BN weight/bias (now Identity modules have no params,
-        # but check just in case)
-        if fold_bn and ".bn." in name and "resblock" not in name.split(".bn.")[0]:
-            # This would be encoder/decoder BN params - should be gone after folding
-            # but Identity modules don't have params so this shouldn't fire
-            pass
-
         np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-        writer.add_tensor(name, np_tensor)
-        n_exported += 1
+
+        if quantize and should_quantize(name):
+            # Q8_0 requires innermost dim (ne[0] in GGML) to be a multiple of
+            # block size 32.  Conv weights have ne[0]=kW=3, so we flatten to
+            # 1D before quantizing and store the original shape as metadata.
+            orig_shape = list(np_tensor.shape)
+            n_elem = np_tensor.size
+            assert n_elem % 32 == 0, (
+                f"Tensor {name} has {n_elem} elements, not a multiple of 32"
+            )
+            flat = np_tensor.reshape(-1)
+            q8_data = gguf_quantize(
+                flat.reshape(-1, 32), GGMLQuantizationType.Q8_0
+            )
+            writer.add_tensor(
+                name, q8_data.reshape(-1),
+                raw_dtype=GGMLQuantizationType.Q8_0,
+            )
+            # Store original shape so C++ loader can restore it
+            for d, s in enumerate(orig_shape):
+                writer.add_uint32(f"deepvqe.shape.{name}.{d}", s)
+            writer.add_uint32(
+                f"deepvqe.shape.{name}.ndim", len(orig_shape)
+            )
+            n_quantized += 1
+        else:
+            writer.add_tensor(name, np_tensor)
+            n_exported += 1
 
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file()
     writer.close()
 
-    print(f"Exported {n_exported} tensors, skipped {n_skipped} BN running stats")
+    print(f"Exported {n_exported} tensors (F32), {n_quantized} tensors (Q8_0), "
+          f"skipped {n_skipped} BN running stats")
     print(f"Saved to: {output_path}")
 
 
@@ -219,6 +264,8 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", required=True, help="Checkpoint path")
     parser.add_argument("--output", default="deepvqe.gguf", help="Output GGUF file")
     parser.add_argument("--no-fold-bn", action="store_true", help="Skip BN folding")
+    parser.add_argument("--quantize", action="store_true",
+                        help="Quantize robust layers to Q8_0 (keeps align/dec1/biases as F32)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -226,4 +273,5 @@ if __name__ == "__main__":
     load_checkpoint(args.checkpoint, model)
     print(f"Loaded checkpoint: {args.checkpoint}")
 
-    export_gguf(model, cfg, args.output, fold_bn=not args.no_fold_bn)
+    export_gguf(model, cfg, args.output, fold_bn=not args.no_fold_bn,
+                quantize=args.quantize)

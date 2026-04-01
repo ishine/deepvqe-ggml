@@ -152,23 +152,12 @@ int main(int argc, char** argv) {
     struct gguf_context* gctx = gguf_init_from_file(gguf_path, gparams);
     if (!gctx) { fprintf(stderr, "Failed to load GGUF\n"); return 1; }
 
-    auto load_tensor = [&](const std::string& name) -> NpyArray {
-        struct ggml_tensor* t = ggml_get_tensor(ggml_ctx, name.c_str());
-        if (!t) { fprintf(stderr, "Missing tensor: %s\n", name.c_str()); return {}; }
-        NpyArray arr;
-        int nd = ggml_n_dims(t);
-        for (int d = nd - 1; d >= 0; d--) arr.shape.push_back(t->ne[d]);
-        arr.data.resize(arr.numel());
-        std::memcpy(arr.data.data(), t->data, arr.numel() * sizeof(float));
-        return arr;
-    };
-
-    NpyArray gru_wih = load_tensor("bottleneck.gru.weight_ih_l0");
-    NpyArray gru_whh = load_tensor("bottleneck.gru.weight_hh_l0");
-    NpyArray gru_bih = load_tensor("bottleneck.gru.bias_ih_l0");
-    NpyArray gru_bhh = load_tensor("bottleneck.gru.bias_hh_l0");
-    NpyArray fc_w = load_tensor("bottleneck.fc.weight");
-    NpyArray fc_b = load_tensor("bottleneck.fc.bias");
+    NpyArray gru_wih = load_tensor_from_ggml(ggml_ctx, "bottleneck.gru.weight_ih_l0", gctx);
+    NpyArray gru_whh = load_tensor_from_ggml(ggml_ctx, "bottleneck.gru.weight_hh_l0", gctx);
+    NpyArray gru_bih = load_tensor_from_ggml(ggml_ctx, "bottleneck.gru.bias_ih_l0", gctx);
+    NpyArray gru_bhh = load_tensor_from_ggml(ggml_ctx, "bottleneck.gru.bias_hh_l0", gctx);
+    NpyArray fc_w = load_tensor_from_ggml(ggml_ctx, "bottleneck.fc.weight", gctx);
+    NpyArray fc_b = load_tensor_from_ggml(ggml_ctx, "bottleneck.fc.bias", gctx);
 
     int hidden_size = (int)gru_whh.dim(1);  // (3*H, H)
     int out_features = (int)fc_w.dim(0);     // (out, in)

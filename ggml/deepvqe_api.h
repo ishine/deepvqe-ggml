@@ -90,6 +90,40 @@ DEEPVQE_API int deepvqe_hop_length(uintptr_t ctx);
  */
 DEEPVQE_API int deepvqe_fft_size(uintptr_t ctx);
 
+/**
+ * Process a single hop of audio through the AEC model (float32 version).
+ *
+ * mic:         Microphone input (mono, float32, [-1,1], 16kHz)
+ * ref:         Far-end reference (mono, float32, [-1,1], 16kHz)
+ * hop_samples: Must equal hop_length (256)
+ * out:         Pre-allocated output buffer (hop_samples floats)
+ *
+ * Returns 0 on success. First call outputs zeros (warmup).
+ */
+DEEPVQE_API int deepvqe_process_frame_f32(uintptr_t ctx,
+                                           const float* mic, const float* ref,
+                                           int hop_samples, float* out);
+
+/**
+ * Process a single hop of audio through the AEC model (int16 PCM version).
+ *
+ * mic:         Microphone input (mono, int16 PCM, 16kHz)
+ * ref:         Far-end reference (mono, int16 PCM, 16kHz)
+ * hop_samples: Must equal hop_length (256)
+ * out:         Pre-allocated output buffer (hop_samples int16s)
+ *
+ * Returns 0 on success. First call outputs zeros (warmup).
+ */
+DEEPVQE_API int deepvqe_process_frame_s16(uintptr_t ctx,
+                                           const int16_t* mic, const int16_t* ref,
+                                           int hop_samples, int16_t* out);
+
+/**
+ * Reset streaming state to initial zeros.
+ * Call between utterances or when restarting processing.
+ */
+DEEPVQE_API void deepvqe_reset(uintptr_t ctx);
+
 #ifdef __cplusplus
 }
 #endif

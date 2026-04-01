@@ -80,6 +80,32 @@ make test-ggml
 Pre-trained weights are available on Hugging Face:
 [richiejp/deepvqe-aec-gguf](https://huggingface.co/richiejp/deepvqe-aec-gguf).
 
+| Variant | File | Size | Description |
+|---------|------|------|-------------|
+| F32 | `deepvqe.gguf` | 31 MB | Full precision (reference) |
+| Q8_0 | `deepvqe_q8.gguf` | 8.5 MB | 8-bit quantized (73% smaller) |
+
+### Quantization
+
+The Q8_0 variant quantizes encoder, decoder (2-5), and bottleneck weights to
+8-bit while keeping precision-sensitive layers at F32: AlignBlock (attention),
+dec1 (mask output), and all biases. End-to-end output divergence from F32 is
+max 5e-2 / mean 7e-4.
+
+To export your own quantized model:
+
+```bash
+make -C train export-q8  # or:
+./train/scripts/docker-run.sh python export_ggml.py \
+    --checkpoint <path> --quantize --output deepvqe_q8.gguf
+```
+
+Compare quantized vs full-precision outputs:
+
+```bash
+make test-quantize
+```
+
 **Safety note:** Training data was filtered by DNSMOS perceived quality scores,
 which can misclassify distressed speech (e.g. screaming, crying) as noise. This
 model may attenuate or distort such signals and should not be relied upon for

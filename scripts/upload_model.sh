@@ -14,6 +14,7 @@
 set -euo pipefail
 
 REPO_ID="richiejp/deepvqe-aec-gguf"
+HF_HUB="huggingface_hub==1.8.0"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -166,7 +167,23 @@ real-time voice input with echo cancellation.
 | **Sample rate** | 16 kHz |
 | **STFT** | 512 FFT, 256 hop (16 ms), sqrt-Hann window |
 | **Delay range** | dmax=32 frames (320 ms) |
-| **Format** | GGUF (F32) |
+| **Format** | GGUF |
+| **Variants** | F32 (31 MB), Q8_0 (8.5 MB) |
+
+## Quantization
+
+The Q8_0 variant (`deepvqe_q8.gguf`) reduces model size by 73% (31 MB to
+8.5 MB) using GGML Q8_0 quantization with selective layer preservation.
+
+| Layer group | Quantization | Reason |
+|-------------|-------------|--------|
+| Encoder/decoder (2-5) weights | Q8_0 | Residual connections mitigate error |
+| Bottleneck GRU + FC weights | Q8_0 | Largest tensors (~3.6M params) |
+| AlignBlock (attention) | F32 | Softmax precision for delay estimation |
+| dec1 (mask output) | F32 | Directly controls complex convolving mask |
+| All biases, ChannelAffine | F32 | Small tensors, negligible size savings |
+
+**Divergence from F32:** output max error 5e-2, mean error 7e-4.
 
 ## Training
 
@@ -194,11 +211,27 @@ code and full documentation.
 CARD
 trap 'rm -f "$MODEL_CARD"' EXIT
 
+# Check for quantized model
+Q8_PATH="${GGUF_PATH%.gguf}_q8.gguf"
+if [ -f "$Q8_PATH" ]; then
+    Q8_CHECKSUM=$(sha256sum "$Q8_PATH" | cut -d' ' -f1)
+    Q8_SIZE=$(stat --format=%s "$Q8_PATH" 2>/dev/null || stat -f%z "$Q8_PATH")
+    echo ""
+    echo "Quantized model found:"
+    echo "  File:     $Q8_PATH"
+    echo "  Size:     $Q8_SIZE bytes ($((Q8_SIZE / 1048576)) MB)"
+    echo "  SHA256:   $Q8_CHECKSUM"
+fi
+
 # Upload
 echo ""
 echo "Uploading to huggingface.co/$REPO_ID ..."
-uvx hf upload "$REPO_ID" "$MODEL_CARD" README.md --repo-type model
-uvx hf upload "$REPO_ID" "$GGUF_PATH" deepvqe.gguf --repo-type model
+uvx --from "$HF_HUB" hf upload "$REPO_ID" "$MODEL_CARD" README.md --repo-type model
+uvx --from "$HF_HUB" hf upload "$REPO_ID" "$GGUF_PATH" deepvqe.gguf --repo-type model
+
+if [ -f "$Q8_PATH" ]; then
+    uvx --from "$HF_HUB" hf upload "$REPO_ID" "$Q8_PATH" deepvqe_q8.gguf --repo-type model
+fi
 
 echo ""
 echo "Done! Update VoxInput's internal/deepvqe/model.go with:"
