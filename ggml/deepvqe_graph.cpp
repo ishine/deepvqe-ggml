@@ -9,6 +9,10 @@
 #include "ggml-cpu.h"
 #include "gguf.h"
 
+#ifdef GGML_USE_CUDA
+#include "ggml-cuda.h"
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -511,9 +515,9 @@ static uint32_t gguf_u32(struct gguf_context* ctx, const char* key) {
 
 bool load_graph_model(const char* path, dvqe_graph_model& model,
                       bool verbose, int n_threads) {
-    // Load GGUF — keep tensors in ggml_context (no dequantization)
+    // Load GGUF metadata only — we'll allocate tensors on the backend buffer
     struct gguf_init_params params;
-    params.no_alloc = false;
+    params.no_alloc = true;
     params.ctx = &model.weight_ctx;
 
     struct gguf_context* gctx = gguf_init_from_file(path, params);
@@ -556,20 +560,62 @@ bool load_graph_model(const char* path, dvqe_graph_model& model,
                model.weights.size(), hp.n_fft, hp.dmax);
     }
 
-    gguf_free(gctx);
-
-    // Initialize CPU backend
-    model.backend = ggml_backend_cpu_init();
-    if (n_threads <= 0) {
-        n_threads = std::max(1, (int)std::thread::hardware_concurrency() - 1);
+    // Initialize backend (try CUDA first, fall back to CPU)
+#ifdef GGML_USE_CUDA
+    if (ggml_backend_cuda_get_device_count() > 0) {
+        model.backend = ggml_backend_cuda_init(0);
+        if (verbose) printf("Using CUDA backend\n");
     }
-    ggml_backend_cpu_set_n_threads(model.backend, n_threads);
-    if (verbose) printf("Using %d CPU threads\n", n_threads);
+#endif
+    if (!model.backend) {
+        model.backend = ggml_backend_cpu_init();
+        if (n_threads <= 0) {
+            n_threads = std::max(1, (int)std::thread::hardware_concurrency() - 1);
+        }
+        ggml_backend_cpu_set_n_threads(model.backend, n_threads);
+        if (verbose) printf("Using CPU backend (%d threads)\n", n_threads);
+    }
 
+    // Allocate weight tensors on the backend buffer (GPU if CUDA, CPU otherwise)
+    model.weight_buf = ggml_backend_alloc_ctx_tensors(model.weight_ctx, model.backend);
+    if (!model.weight_buf) {
+        fprintf(stderr, "Failed to allocate weight buffer\n");
+        gguf_free(gctx);
+        return false;
+    }
+
+    // Read tensor data from GGUF file into backend buffers
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "Failed to open: %s\n", path);
+        gguf_free(gctx);
+        return false;
+    }
+    size_t data_offset = gguf_get_data_offset(gctx);
+    for (int i = 0; i < n_tensors; i++) {
+        const char* name = gguf_get_tensor_name(gctx, i);
+        struct ggml_tensor* t = ggml_get_tensor(model.weight_ctx, name);
+        if (!t) continue;
+        size_t offset = gguf_get_tensor_offset(gctx, i);
+        size_t nbytes = ggml_nbytes(t);
+        std::vector<uint8_t> buf(nbytes);
+        fseek(f, data_offset + offset, SEEK_SET);
+        if (fread(buf.data(), 1, nbytes, f) != nbytes) {
+            fprintf(stderr, "Short read for tensor: %s\n", name);
+            fclose(f);
+            gguf_free(gctx);
+            return false;
+        }
+        ggml_backend_tensor_set(t, buf.data(), 0, nbytes);
+    }
+    fclose(f);
+
+    gguf_free(gctx);
     return true;
 }
 
 void free_graph_model(dvqe_graph_model& model) {
+    if (model.weight_buf) { ggml_backend_buffer_free(model.weight_buf); model.weight_buf = nullptr; }
     if (model.backend) { ggml_backend_free(model.backend); model.backend = nullptr; }
     if (model.weight_ctx) { ggml_free(model.weight_ctx); model.weight_ctx = nullptr; }
     model.weights.clear();
@@ -583,170 +629,49 @@ NpyArray forward_graph(const NpyArray& mic_stft, const NpyArray& ref_stft,
                        std::vector<block_timing>* timings,
                        bool verbose,
                        const std::string& dump_dir) {
+    (void)dump_dir;
     auto& hp = m.hparams;
     int F = (int)mic_stft.dim(1);
     int T = (int)mic_stft.dim(2);
 
-    if (verbose) printf("forward_graph: F=%d T=%d\n", F, T);
+    if (verbose) printf("forward_graph: F=%d T=%d (streaming)\n", F, T);
 
-    // Build graph context (large enough for all nodes — GRU unrolling needs many)
-    struct ggml_context* ctx = make_ctx(512 * 1024 * 1024);
-
-    // Input STFTs: (ne0=2, ne1=T, ne2=F) — complex pair fastest
-    struct ggml_tensor* mic_in = input_3d(ctx, 2, T, F);
-    struct ggml_tensor* ref_in = input_3d(ctx, 2, T, F);
-
-    // 1. Feature extraction
-    struct ggml_tensor* mic_fe = build_fe(ctx, mic_in, hp.power_law_c);
-    struct ggml_tensor* ref_fe = build_fe(ctx, ref_in, hp.power_law_c);
-
-    // 2. Mic encoder 1-2
-    struct ggml_tensor* mic_e1 = build_encoder_block(ctx, mic_fe,
-        m.w("mic_enc1.conv.weight"), m.w("mic_enc1.conv.bias"),
-        m.w("mic_enc1.resblock.conv.weight"), m.w("mic_enc1.resblock.conv.bias"));
-    mic_e1 = ggml_reshape_3d(ctx, mic_e1, mic_e1->ne[0], mic_e1->ne[1], mic_e1->ne[2]);
-
-    struct ggml_tensor* mic_e2 = build_encoder_block(ctx, mic_e1,
-        m.w("mic_enc2.conv.weight"), m.w("mic_enc2.conv.bias"),
-        m.w("mic_enc2.resblock.conv.weight"), m.w("mic_enc2.resblock.conv.bias"));
-    mic_e2 = ggml_reshape_3d(ctx, mic_e2, mic_e2->ne[0], mic_e2->ne[1], mic_e2->ne[2]);
-
-    // 3. Far-end encoder 1-2
-    struct ggml_tensor* far_e1 = build_encoder_block(ctx, ref_fe,
-        m.w("far_enc1.conv.weight"), m.w("far_enc1.conv.bias"),
-        m.w("far_enc1.resblock.conv.weight"), m.w("far_enc1.resblock.conv.bias"));
-    far_e1 = ggml_reshape_3d(ctx, far_e1, far_e1->ne[0], far_e1->ne[1], far_e1->ne[2]);
-
-    struct ggml_tensor* far_e2 = build_encoder_block(ctx, far_e1,
-        m.w("far_enc2.conv.weight"), m.w("far_enc2.conv.bias"),
-        m.w("far_enc2.resblock.conv.weight"), m.w("far_enc2.resblock.conv.bias"));
-    far_e2 = ggml_reshape_3d(ctx, far_e2, far_e2->ne[0], far_e2->ne[1], far_e2->ne[2]);
-
-    // 4. Alignment
-    struct ggml_tensor* aligned = build_align(ctx, mic_e2, far_e2,
-        m.w("align.pconv_mic.weight"), m.w("align.pconv_mic.bias"),
-        m.w("align.pconv_ref.weight"), m.w("align.pconv_ref.bias"),
-        m.w("align.conv.1.weight"), m.w("align.conv.1.bias"),
-        hp.dmax);
-
-    // 5. Concat + encoder 3-5
-    struct ggml_tensor* cat = build_concat_channels(ctx, mic_e2, aligned);
-    struct ggml_tensor* mic_e3 = build_encoder_block(ctx, cat,
-        m.w("mic_enc3.conv.weight"), m.w("mic_enc3.conv.bias"),
-        m.w("mic_enc3.resblock.conv.weight"), m.w("mic_enc3.resblock.conv.bias"));
-    mic_e3 = ggml_reshape_3d(ctx, mic_e3, mic_e3->ne[0], mic_e3->ne[1], mic_e3->ne[2]);
-
-    struct ggml_tensor* mic_e4 = build_encoder_block(ctx, mic_e3,
-        m.w("mic_enc4.conv.weight"), m.w("mic_enc4.conv.bias"),
-        m.w("mic_enc4.resblock.conv.weight"), m.w("mic_enc4.resblock.conv.bias"));
-    mic_e4 = ggml_reshape_3d(ctx, mic_e4, mic_e4->ne[0], mic_e4->ne[1], mic_e4->ne[2]);
-
-    struct ggml_tensor* mic_e5 = build_encoder_block(ctx, mic_e4,
-        m.w("mic_enc5.conv.weight"), m.w("mic_enc5.conv.bias"),
-        m.w("mic_enc5.resblock.conv.weight"), m.w("mic_enc5.resblock.conv.bias"));
-    mic_e5 = ggml_reshape_3d(ctx, mic_e5, mic_e5->ne[0], mic_e5->ne[1], mic_e5->ne[2]);
-
-    // 6. Bottleneck
-    struct ggml_tensor* gru_h_init = nullptr;
-    struct ggml_tensor* bn = build_bottleneck(ctx, mic_e5,
-        m.w("bottleneck.gru.weight_ih_l0"), m.w("bottleneck.gru.weight_hh_l0"),
-        m.w("bottleneck.gru.bias_ih_l0"), m.w("bottleneck.gru.bias_hh_l0"),
-        m.w("bottleneck.fc.weight"), m.w("bottleneck.fc.bias"),
-        &gru_h_init);
-
-    // 7. Decoder with skip connections + frequency trimming
-    struct ggml_tensor* d5 = build_decoder_block(ctx, bn, mic_e5,
-        m.w("dec5.skip_conv.weight"), m.w("dec5.skip_conv.bias"),
-        m.w("dec5.resblock.conv.weight"), m.w("dec5.resblock.conv.bias"),
-        m.w("dec5.deconv.conv.weight"), m.w("dec5.deconv.conv.bias"),
-        m.w("dec5.bn.scale"), m.w("dec5.bn.bias"), false);
-    d5 = build_freq_trim(ctx, d5, mic_e4->ne[0]);
-
-    struct ggml_tensor* d4 = build_decoder_block(ctx, d5, mic_e4,
-        m.w("dec4.skip_conv.weight"), m.w("dec4.skip_conv.bias"),
-        m.w("dec4.resblock.conv.weight"), m.w("dec4.resblock.conv.bias"),
-        m.w("dec4.deconv.conv.weight"), m.w("dec4.deconv.conv.bias"),
-        m.w("dec4.bn.scale"), m.w("dec4.bn.bias"), false);
-    d4 = build_freq_trim(ctx, d4, mic_e3->ne[0]);
-
-    struct ggml_tensor* d3 = build_decoder_block(ctx, d4, mic_e3,
-        m.w("dec3.skip_conv.weight"), m.w("dec3.skip_conv.bias"),
-        m.w("dec3.resblock.conv.weight"), m.w("dec3.resblock.conv.bias"),
-        m.w("dec3.deconv.conv.weight"), m.w("dec3.deconv.conv.bias"),
-        m.w("dec3.bn.scale"), m.w("dec3.bn.bias"), false);
-    d3 = build_freq_trim(ctx, d3, mic_e2->ne[0]);
-
-    struct ggml_tensor* d2 = build_decoder_block(ctx, d3, mic_e2,
-        m.w("dec2.skip_conv.weight"), m.w("dec2.skip_conv.bias"),
-        m.w("dec2.resblock.conv.weight"), m.w("dec2.resblock.conv.bias"),
-        m.w("dec2.deconv.conv.weight"), m.w("dec2.deconv.conv.bias"),
-        m.w("dec2.bn.scale"), m.w("dec2.bn.bias"), false);
-    d2 = build_freq_trim(ctx, d2, mic_e1->ne[0]);
-
-    struct ggml_tensor* d1 = build_decoder_block(ctx, d2, mic_e1,
-        m.w("dec1.skip_conv.weight"), m.w("dec1.skip_conv.bias"),
-        m.w("dec1.resblock.conv.weight"), m.w("dec1.resblock.conv.bias"),
-        m.w("dec1.deconv.conv.weight"), m.w("dec1.deconv.conv.bias"),
-        nullptr, nullptr, true);  // last decoder: no BN
-    d1 = build_freq_trim(ctx, d1, mic_fe->ne[0]);
-
-    // 8. CCM
-    struct ggml_tensor* ccm_out = build_ccm(ctx, d1, mic_in, nullptr, nullptr);
-    // ccm_out: (ne0=F, ne1=T, ne2=2) with F fastest
-    // Hand-rolled format: (F, T, 2) with 2 fastest = (ne0=2, ne1=T, ne2=F)
-    struct ggml_tensor* enhanced = ggml_cont(ctx,
-        ggml_permute(ctx, ccm_out, 2, 1, 0, 3));
-    // enhanced: (ne0=2, ne1=T, ne2=F)
-
-    ggml_set_output(enhanced);
-
-    // Build and run graph
-    struct ggml_cgraph* graph = ggml_new_graph_custom(ctx, 65536, false);
-    ggml_build_forward_expand(graph, enhanced);
-
-    if (verbose) printf("  Graph: %d nodes\n", ggml_graph_n_nodes(graph));
-
-    ggml_gallocr_t galloc = ggml_gallocr_new(
-        ggml_backend_get_default_buffer_type(m.backend));
-    if (!ggml_gallocr_alloc_graph(galloc, graph)) {
-        fprintf(stderr, "ERROR: gallocr_alloc_graph failed\n");
-        ggml_gallocr_free(galloc);
-        ggml_free(ctx);
+    // Build streaming graph, process frame-by-frame (matches PyTorch exactly)
+    dvqe_stream_graph sg;
+    if (!build_stream_graph(m, sg)) {
+        fprintf(stderr, "ERROR: build_stream_graph failed\n");
         return {};
     }
 
-    // Set input data
-    ggml_backend_tensor_set(mic_in, mic_stft.data.data(), 0, ggml_nbytes(mic_in));
-    ggml_backend_tensor_set(ref_in, ref_stft.data.data(), 0, ggml_nbytes(ref_in));
-    // Zero-initialize GRU hidden state
-    if (gru_h_init) {
-        std::vector<float> zeros(ggml_nelements(gru_h_init), 0.0f);
-        ggml_backend_tensor_set(gru_h_init, zeros.data(), 0, ggml_nbytes(gru_h_init));
-    }
+    // Output STFT: (F, T, 2) layout matching input
+    NpyArray result;
+    result.shape = {1, (int64_t)F, (int64_t)T, 2};
+    result.data.resize(F * T * 2, 0.0f);
+
+    std::vector<float> mic_frame(F * 2);
+    std::vector<float> ref_frame(F * 2);
+    std::vector<float> enh_frame(F * 2);
 
     int64_t t0 = ggml_time_us();
-    ggml_backend_graph_compute(m.backend, graph);
+
+    for (int t = 0; t < T; t++) {
+        extract_stft_frame(mic_stft.data.data(), F, T, t, mic_frame.data());
+        extract_stft_frame(ref_stft.data.data(), F, T, t, ref_frame.data());
+
+        process_frame_graph(sg, m, mic_frame.data(), ref_frame.data(), enh_frame.data());
+
+        scatter_stft_frame(enh_frame.data(), result.data.data(), F, T, t);
+    }
+
     int64_t t1 = ggml_time_us();
 
     if (timings) timings->push_back({"total_graph", (double)(t1 - t0)});
     if (verbose) {
-        printf("  Total graph: %lld us (%d nodes)\n",
-               (long long)(t1 - t0), ggml_graph_n_nodes(graph));
+        printf("  %d frames in %lld us (%.1f us/frame)\n",
+               T, (long long)(t1 - t0), (double)(t1 - t0) / T);
     }
 
-    // Dump intermediates if requested (TODO: wrap all in ggml_cont for buffer safety)
-    (void)dump_dir;
-
-    // Read enhanced output: (ne0=2, ne1=T, ne2=F) — 2 varies fastest (matches hand-rolled)
-    // NpyArray shape: (1, F, T, 2)
-    NpyArray result;
-    result.shape = {1, (int64_t)enhanced->ne[2], (int64_t)enhanced->ne[1], (int64_t)enhanced->ne[0]};
-    result.data.resize(ggml_nelements(enhanced));
-    ggml_backend_tensor_get(enhanced, result.data.data(), 0, ggml_nbytes(enhanced));
-
-    ggml_gallocr_free(galloc);
-    ggml_free(ctx);
-
+    free_stream_graph(sg);
     return result;
 }
 

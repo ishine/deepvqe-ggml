@@ -103,20 +103,103 @@ listen: build ## Generate WAV audio from checkpoint (set CHECKPOINT=path)
 	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/listen.py --config $(CONFIG) --checkpoint $(CHECKPOINT) $(EXTRA_ARGS)
 
-.PHONY: dump-val-audio
-dump-val-audio: build ## Dump 1000 validation audio triples (mic/ref/clean) for C++ testing
+.PHONY: eval-pt
+eval-pt: build ## PyTorch eval: save val_audio + pt_enhanced + pt_scores.json
 	$(DOCKER_UTIL) $(IMAGE) \
-		python scripts/dump_val_audio.py --config $(CONFIG) --checkpoint $(CHECKPOINT) \
-			--output ../eval_output/val_audio $(EXTRA_ARGS)
+		python eval.py --config $(CONFIG) --checkpoint $(CHECKPOINT) \
+			--save-val-audio $(EXTRA_ARGS)
 
-GGML_ENH_DIR ?= ../ggml_eval
+.PHONY: build-ggml
+build-ggml: build ## Build GGML C++ with CUDA inside Docker
+	$(DOCKER_UTIL) $(IMAGE) bash -c '\
+		cd /workspace/deepvqe/ggml && \
+		cmake -B build-cuda -DCMAKE_BUILD_TYPE=Release -DDEEPVQE_CUDA=ON && \
+		cmake --build build-cuda -j$$(nproc)'
 
-.PHONY: eval-ggml
-eval-ggml: build-onnx ## Score GGML-enhanced audio with DNSMOS/AECMOS/PESQ/STOI
-	$(DOCKER_UTIL) $(IMAGE_ONNX) \
-		python3 scripts/eval_ggml.py \
+GGML_MODEL ?= deepvqe.gguf
+N_EVAL     ?= 1000
+
+.PHONY: eval-ggml-infer
+eval-ggml-infer: build-ggml ## Run GGML CUDA inference on val data
+	$(DOCKER_UTIL) $(IMAGE) bash -c '\
+		mkdir -p /workspace/deepvqe/eval_output/ggml_enhanced && \
+		/workspace/deepvqe/ggml/build-cuda/eval_graph \
+			/workspace/deepvqe/$(GGML_MODEL) \
+			--val-dir /workspace/deepvqe/eval_output/val_audio \
+			--save-dir /workspace/deepvqe/eval_output/ggml_enhanced \
+			--max $(N_EVAL)'
+
+SCORE_LABEL  ?= unknown
+SCORE_OUTPUT ?= ../eval_output/scores/scores.json
+ENH_DIR      ?= ../eval_output/ggml_enhanced
+
+.PHONY: eval-score
+eval-score: build ## Score enhanced audio (ERLE/PESQ/STOI/DNSMOS/AECMOS)
+	$(DOCKER_UTIL) $(IMAGE) \
+		python3 scripts/eval_score.py \
 			--val-dir ../eval_output/val_audio \
-			--enh-dir $(GGML_ENH_DIR) $(EXTRA_ARGS)
+			--enh-dir $(ENH_DIR) \
+			--label $(SCORE_LABEL) \
+			--output $(SCORE_OUTPUT) $(EXTRA_ARGS)
+
+# ── GGML Validation Tests (run inside Docker with CUDA) ───────────────────
+
+TEST_BLOCKS := fe_mic mic_enc1 bottleneck dec5 ccm align
+
+.PHONY: gen-test-data
+gen-test-data: build ## Generate PyTorch reference data for GGML tests
+	$(DOCKER_UTIL) $(IMAGE) \
+		python scripts/compare.py --mode pytorch --checkpoint $(CHECKPOINT) \
+			--output ../intermediates/pytorch --use-audio
+	@for block in $(TEST_BLOCKS); do \
+		echo "Exporting block: $$block"; \
+		$(DOCKER_UTIL) $(IMAGE) \
+			python scripts/compare.py --mode block --checkpoint $(CHECKPOINT) \
+				--block $$block --output ../intermediates/blocks --use-audio; \
+	done
+	$(DOCKER_UTIL) $(IMAGE) \
+		python3 scripts/gen_stft_ref.py \
+			--output-dir ../ggml/test_data \
+			--checkpoint $(CHECKPOINT) \
+			--val-dir ../eval_output/val_audio \
+			--n-samples 5
+
+.PHONY: test-ggml
+test-ggml: build-ggml ## Run GGML block tests against PyTorch intermediates
+	$(DOCKER_UTIL) $(IMAGE) bash -c '\
+		cd /workspace/deepvqe && \
+		echo "=== FE ===" && \
+		ggml/build-cuda/test_fe --input intermediates/blocks/fe_mic_input.npy --expected intermediates/blocks/fe_mic_output.npy && \
+		echo "=== Encoder ===" && \
+		ggml/build-cuda/test_encoder --gguf deepvqe.gguf --block mic_enc1 --input intermediates/blocks/mic_enc1_input.npy --expected intermediates/blocks/mic_enc1_output.npy && \
+		echo "=== Bottleneck ===" && \
+		ggml/build-cuda/test_bottleneck --gguf deepvqe.gguf --input intermediates/blocks/bottleneck_input.npy --expected intermediates/blocks/bottleneck_output.npy && \
+		echo "=== Decoder ===" && \
+		ggml/build-cuda/test_decoder --gguf deepvqe.gguf --block dec5 --input-0 intermediates/blocks/dec5_input_0.npy --input-1 intermediates/blocks/dec5_input_1.npy --expected intermediates/blocks/dec5_output.npy && \
+		echo "=== CCM ===" && \
+		ggml/build-cuda/test_ccm --input-mask intermediates/blocks/ccm_input_0.npy --input-stft intermediates/blocks/ccm_input_1.npy --expected intermediates/blocks/ccm_output.npy && \
+		echo "=== AlignBlock ===" && \
+		ggml/build-cuda/test_align --gguf deepvqe.gguf --input-mic intermediates/blocks/align_input_0.npy --input-ref intermediates/blocks/align_input_1.npy --expected intermediates/blocks/align_output.npy && \
+		echo "=== All block tests passed ==="'
+
+.PHONY: test-stft
+test-stft: build-ggml ## Run STFT + end-to-end model comparison tests
+	$(DOCKER_UTIL) $(IMAGE) bash -c '\
+		cd /workspace/deepvqe && \
+		ggml/build-cuda/test_stft \
+			--ref-input ggml/test_data/stft_input.npy \
+			--ref-stft ggml/test_data/stft_ref.npy \
+			--model deepvqe.gguf \
+			--val-dir eval_output/val_audio \
+			--py-ref-dir ggml/test_data \
+			--n-samples 5'
+
+.PHONY: test-streaming
+test-streaming: build-ggml ## PCM batch-vs-streaming equivalence test
+	$(DOCKER_UTIL) $(IMAGE) bash -c '\
+		cd /workspace/deepvqe && \
+		ggml/build-cuda/test_streaming deepvqe.gguf \
+			--audio-dirs datasets_fullband/clean datasets_fullband/noise'
 
 .PHONY: export
 export: build ## Export checkpoint to GGUF (set CHECKPOINT=path)

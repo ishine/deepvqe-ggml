@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(DEEPVQE_BUILD_SHARED "Build shared library with C API" OFF)
+option(DEEPVQE_CUDA "Enable GGML CUDA backend" OFF)
 
 # Need PIC for everything when building shared lib (ggml static lib gets linked in)
 if(DEEPVQE_BUILD_SHARED)
@@ -16,7 +17,12 @@ endif()
 set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(GGML_STATIC ON CACHE BOOL "" FORCE)
+if(DEEPVQE_CUDA)
+    set(GGML_CUDA ON CACHE BOOL "" FORCE)
+    set(GGML_STATIC OFF CACHE BOOL "" FORCE)
+else()
+    set(GGML_STATIC ON CACHE BOOL "" FORCE)
+endif()
 add_subdirectory(vendor/ggml)
 
 # Optional: libsndfile for audio loading in tests
@@ -109,10 +115,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_conv2d_minimal.cpp")
     target_link_libraries(test_conv2d_minimal PRIVATE ggml)
 endif()
 
-# STFT test
+# STFT test (includes end-to-end model comparison via C API)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_stft.cpp")
-    add_executable(test_stft test_stft.cpp)
-    target_link_libraries(test_stft PRIVATE dvqe_common)
+    add_executable(test_stft test_stft.cpp deepvqe_api.cpp)
+    target_link_libraries(test_stft PRIVATE dvqe_graph)
 endif()
 
 # GGML graph evaluation (uses C API)

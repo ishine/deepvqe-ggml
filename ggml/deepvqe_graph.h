@@ -25,6 +25,7 @@ struct dvqe_graph_model {
 
     // Weight storage — kept as ggml tensors (may be quantized)
     struct ggml_context* weight_ctx = nullptr;
+    ggml_backend_buffer_t weight_buf = nullptr;
 
     // Named weight lookup
     std::map<std::string, struct ggml_tensor*> weights;

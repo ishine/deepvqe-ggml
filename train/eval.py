@@ -9,6 +9,8 @@ Features:
 """
 
 import argparse
+import json
+import random
 from pathlib import Path
 
 import matplotlib
@@ -67,7 +69,8 @@ def plot_delay_heatmap(delay_dist, save_path=None):
     return fig
 
 
-def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_samples=None):
+def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output",
+             max_samples=None, save_val_audio=False, seed=42):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -76,6 +79,11 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
     (out_dir / "spectrograms").mkdir(exist_ok=True)
     (out_dir / "audio").mkdir(exist_ok=True)
     (out_dir / "delays").mkdir(exist_ok=True)
+
+    if save_val_audio:
+        (out_dir / "val_audio").mkdir(exist_ok=True)
+        (out_dir / "pt_enhanced").mkdir(exist_ok=True)
+        (out_dir / "scores").mkdir(exist_ok=True)
 
     # Model
     model = DeepVQEAEC.from_config(cfg).to(device)
@@ -108,10 +116,14 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
     target_len = int(cfg.training.clip_length_sec * sr)
 
     all_metrics = []
+    all_metadata = []
     use_amp = device.type == "cuda"
 
     with torch.no_grad():
         for i in range(n_samples):
+            if save_val_audio:
+                random.seed(seed + i)
+                np.random.seed(seed + i)
             sample = val_ds[i]
             mic_stft = sample["mic_stft"].unsqueeze(0).to(device)
             ref_stft = sample["ref_stft"].unsqueeze(0).to(device)
@@ -128,6 +140,21 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
             enh_np = enh_wav[0].cpu().numpy()
             clean_np = clean_wav[0].cpu().numpy()
             ref_np = sample["ref_wav"].numpy() if "ref_wav" in sample else None
+
+            # Save val_audio + pt_enhanced for GGML eval pipeline
+            if save_val_audio:
+                L = min(len(mic_np), len(enh_np), len(clean_np))
+                np.save(out_dir / "val_audio" / f"mic_{i:04d}.npy", mic_np[:L])
+                np.save(out_dir / "val_audio" / f"ref_{i:04d}.npy", ref_np[:L] if ref_np is not None else mic_np[:L])
+                np.save(out_dir / "val_audio" / f"clean_{i:04d}.npy", clean_np[:L])
+                np.save(out_dir / "pt_enhanced" / f"enhanced_{i:04d}.npy", enh_np[:L])
+                meta = sample.get("metadata", {})
+                all_metadata.append({
+                    "scenario": meta.get("scenario", "unknown"),
+                    "delay_samples": int(sample.get("delay_samples", 0)),
+                    "snr_db": float(meta.get("snr_db", 0)),
+                    "ser_db": float(meta.get("ser_db", 0)),
+                })
 
             # Compute metrics
             metrics = evaluate_sample(mic_np, enh_np, clean_np, sr, ref_wav=ref_np)
@@ -216,6 +243,49 @@ def evaluate(cfg, checkpoint_path, dummy=False, output_dir="eval_output", max_sa
         summary["deg_mos_mean"] = float(np.mean(deg_mos))
 
     np.save(out_dir / "summary.npy", summary)
+
+    # Save val_audio metadata and per-sample scores as JSON
+    if save_val_audio and all_metadata:
+        np.save(out_dir / "val_audio" / "metadata.npy", all_metadata)
+
+        # Build per-sample scores for JSON
+        scores_data = {
+            "label": "pytorch",
+            "n_samples": n_samples,
+            "per_sample": [],
+            "aggregate": {},
+        }
+        for m in all_metrics:
+            entry = {"idx": m["sample_idx"]}
+            for key in ["erle_db", "seg_snr", "pesq", "stoi",
+                        "dnsmos_ovrl", "dnsmos_sig", "dnsmos_bak",
+                        "echo_mos", "deg_mos"]:
+                if key in m:
+                    entry[key] = float(m[key])
+            # Attach scenario from metadata
+            idx = m["sample_idx"]
+            if idx < len(all_metadata):
+                entry["scenario"] = all_metadata[idx]["scenario"]
+            scores_data["per_sample"].append(entry)
+
+        # Aggregate by scenario
+        from collections import defaultdict
+        by_scenario = defaultdict(lambda: defaultdict(list))
+        for entry in scores_data["per_sample"]:
+            sc = entry.get("scenario", "unknown")
+            for k, v in entry.items():
+                if isinstance(v, float):
+                    by_scenario[sc][k].append(v)
+        for sc, metrics in by_scenario.items():
+            scores_data["aggregate"][sc] = {
+                k: float(np.mean(v)) for k, v in metrics.items()
+            }
+
+        scores_path = out_dir / "scores" / "pt_scores.json"
+        with open(scores_path, "w") as f:
+            json.dump(scores_data, f, indent=2)
+        print(f"Saved scores to {scores_path}")
+
     return summary
 
 
@@ -226,8 +296,12 @@ if __name__ == "__main__":
     parser.add_argument("--dummy", action="store_true", help="Use dummy dataset")
     parser.add_argument("--output-dir", default="../eval_output", help="Output directory")
     parser.add_argument("--max-samples", type=int, default=None, help="Max samples to evaluate")
+    parser.add_argument("--save-val-audio", action="store_true",
+                        help="Save val_audio + pt_enhanced .npy for GGML eval pipeline")
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for reproducible samples")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     evaluate(cfg, args.checkpoint, dummy=args.dummy,
-             output_dir=args.output_dir, max_samples=args.max_samples)
+             output_dir=args.output_dir, max_samples=args.max_samples,
+             save_val_audio=args.save_val_audio, seed=args.seed)

@@ -23,7 +23,13 @@ models/
 
 # GGML build artifacts
 ggml/build/
+ggml/build-cuda/
 intermediates/
+
+# Stale eval output directories (use eval_output/ instead)
+ggml_eval/
+ggml_eval_f32/
+ggml_eval_q8/
 
 # Papers (link to arxiv instead)
 paper.pdf
