@@ -24,6 +24,23 @@ CCM, AlignBlock.
 Uses Docker for training (`make -C train build && make -C train train-minimal`).
 Uses nix flake for C++ build (`nix develop` provides cmake + gcc).
 
+### C++ Build Variants
+
+The CPU build (`nix develop`) produces multiple shared libraries — one per ISA
+level (SSE4.2, AVX2, AVX-512/Zen4, etc.) — selected automatically at runtime
+based on CPU capabilities. All binaries and `.so` files are placed in
+`ggml/build/bin/`. The backend loader searches the executable's directory, so
+binaries and `.so` files must stay together.
+
+The CUDA build (`make build-ggml` via Docker) produces binaries at
+`ggml/build-cuda/` that link against shared CUDA libraries (`libcudart.so`,
+`libcublas.so`) from the NGC container. These binaries must run inside the
+Docker container or on a host with matching CUDA runtime.
+
+Consumers of `libdeepvqe.so` (the C API shared library) must ensure the
+`libggml-cpu-*.so` variant files are discoverable at runtime — either in the
+same directory as the consumer binary or via `LD_LIBRARY_PATH`.
+
 ## Running Python Code
 
 All Python code must run inside the Docker container (it has PyTorch, CUDA,
@@ -90,7 +107,7 @@ flake.nix                           # Nix dev env (cmake, gcc for C++ build)
 LICENSE                             # Apache 2.0
 
 ggml/
-  CMakeLists.txt                    # CMake build with ggml submodule (static linking)
+  CMakeLists.txt                    # CMake build with ggml submodule (CPU: dynamic ISA variants, CUDA: static)
   deepvqe.cpp                      # CLI inference binary
   deepvqe_model.cpp / .h           # Model struct + forward pass
   deepvqe_api.cpp / .h             # C API shared library

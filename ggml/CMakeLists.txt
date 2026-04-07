@@ -21,7 +21,18 @@ if(DEEPVQE_CUDA)
     set(GGML_CUDA ON CACHE BOOL "" FORCE)
     set(GGML_STATIC OFF CACHE BOOL "" FORCE)
 else()
-    set(GGML_STATIC ON CACHE BOOL "" FORCE)
+    # Build all CPU backend variants (SSE4.2 through AVX-512/Zen4) as shared
+    # libraries, selected at runtime based on CPU capabilities.
+    # This avoids needing -march=native (which Nix strips).
+    set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+    set(GGML_BACKEND_DL ON CACHE BOOL "" FORCE)
+    set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
+    set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+    set(GGML_STATIC OFF CACHE BOOL "" FORCE)
+    # Put all binaries and .so's in the same directory so ggml_backend_load_all()
+    # finds the CPU variant libraries next to the executable.
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE PATH "" FORCE)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE PATH "" FORCE)
 endif()
 add_subdirectory(vendor/ggml)
 

@@ -6,7 +6,6 @@
  */
 
 #include "deepvqe_graph.h"
-#include "ggml-cpu.h"
 #include "gguf.h"
 
 #ifdef GGML_USE_CUDA
@@ -560,6 +559,14 @@ bool load_graph_model(const char* path, dvqe_graph_model& model,
                model.weights.size(), hp.n_fft, hp.dmax);
     }
 
+    // Load dynamic backends (CPU variants with different ISA support).
+    // Searches: GGML_BACKEND_DIR (compile-time), executable dir, current dir.
+    static bool backends_loaded = false;
+    if (!backends_loaded) {
+        ggml_backend_load_all();
+        backends_loaded = true;
+    }
+
     // Initialize backend (try CUDA first, fall back to CPU)
 #ifdef GGML_USE_CUDA
     if (ggml_backend_cuda_get_device_count() > 0) {
@@ -568,11 +575,22 @@ bool load_graph_model(const char* path, dvqe_graph_model& model,
     }
 #endif
     if (!model.backend) {
-        model.backend = ggml_backend_cpu_init();
+        model.backend = ggml_backend_init_by_name("CPU", nullptr);
+        if (!model.backend) {
+            fprintf(stderr, "Failed to init CPU backend (check .so files are next to executable)\n");
+            return false;
+        }
         if (n_threads <= 0) {
             n_threads = std::max(1, (int)std::thread::hardware_concurrency() - 1);
         }
-        ggml_backend_cpu_set_n_threads(model.backend, n_threads);
+        // Set thread count via dynamic proc address (works with GGML_BACKEND_DL)
+        auto dev = ggml_backend_get_device(model.backend);
+        if (dev) {
+            auto reg = ggml_backend_dev_backend_reg(dev);
+            auto fn = (ggml_backend_set_n_threads_t)
+                ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
+            if (fn) fn(model.backend, n_threads);
+        }
         if (verbose) printf("Using CPU backend (%d threads)\n", n_threads);
     }
 

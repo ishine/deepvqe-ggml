@@ -8,7 +8,6 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
-#include "ggml-cpu.h"
 
 #include <cstdio>
 #include <cstring>
@@ -43,7 +42,9 @@ int main() {
     struct ggml_cgraph* graph = ggml_new_graph(ctx);
     ggml_build_forward_expand(graph, conv);
 
-    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_load_all();
+    ggml_backend_t backend = ggml_backend_init_by_name("CPU", nullptr);
+    if (!backend) { fprintf(stderr, "Failed to init CPU backend\n"); return 1; }
     ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     ggml_gallocr_alloc_graph(galloc, graph);
 
