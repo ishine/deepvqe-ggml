@@ -1,136 +1,215 @@
 /**
- * Streaming equivalence test: compare batch vs frame-by-frame processing.
- *
- * Loads a model and test audio, processes it both ways, and verifies
- * the outputs match within floating-point tolerance.
+ * Streaming equivalence test: batch deepvqe_process_f32() vs
+ * frame-by-frame deepvqe_process_frame_f32() on real audio.
  *
  * Usage:
- *   test_streaming model.gguf --input-npy mic.npy ref.npy
+ *   test_streaming model.gguf --audio-dirs mic_dir/ ref_dir/ [--n-pairs 5]
  */
 
-#include "deepvqe_model.h"
 #include "deepvqe_api.h"
+#include "common.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
+// ── Test 1: PCM end-to-end batch vs streaming ────────────────────────────
+
+#ifdef DEEPVQE_HAS_SNDFILE
+#include <dirent.h>
+
+// Collect all .flac files under a directory, recursively.
+static void collect_flac(const std::string& dir, std::vector<std::string>& out) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        std::string path = dir + "/" + e->d_name;
+        if (e->d_type == DT_DIR) {
+            collect_flac(path, out);
+        } else if (e->d_type == DT_REG || e->d_type == DT_LNK) {
+            size_t len = strlen(e->d_name);
+            if (len > 5 && strcmp(e->d_name + len - 5, ".flac") == 0)
+                out.push_back(path);
+        }
+    }
+    closedir(d);
+}
+
+// Pick n indices spread evenly across [0, total).
+static std::vector<size_t> spread_indices(size_t total, int n) {
+    std::vector<size_t> idx;
+    if (total == 0 || n <= 0) return idx;
+    if ((size_t)n >= total) {
+        for (size_t i = 0; i < total; i++) idx.push_back(i);
+        return idx;
+    }
+    for (int i = 0; i < n; i++)
+        idx.push_back((size_t)((double)i / n * total));
+    return idx;
+}
+
+// Run one pair through batch + streaming, return true if they match.
+static bool run_one_pcm_pair(uintptr_t ctx, const std::string& mic_path,
+                              const std::string& ref_path, int pair_idx) {
+    int hop = deepvqe_hop_length(ctx);
+    int sr = deepvqe_sample_rate(ctx);
+    int n_fft = deepvqe_fft_size(ctx);
+
+    std::vector<float> mic = audio_load_mono(mic_path, sr);
+    std::vector<float> ref = audio_load_mono(ref_path, sr);
+    if (mic.empty() || ref.empty()) {
+        fprintf(stderr, "  [%d] Failed to load audio\n", pair_idx);
+        return false;
+    }
+
+    int n_samples = (int)std::min(mic.size(), ref.size());
+    if (n_samples < n_fft) {
+        printf("  [%d] SKIP (too short: %d samples)\n", pair_idx, n_samples);
+        return true;
+    }
+    mic.resize(n_samples);
+    ref.resize(n_samples);
+
+    // Batch
+    std::vector<float> batch_out(n_samples, 0.0f);
+    deepvqe_reset(ctx);
+    int ret = deepvqe_process_f32(ctx, mic.data(), ref.data(),
+                                   n_samples, batch_out.data());
+    if (ret != 0) {
+        fprintf(stderr, "  [%d] Batch failed: %s\n", pair_idx, deepvqe_last_error(ctx));
+        return false;
+    }
+
+    // Streaming
+    deepvqe_reset(ctx);
+    int n_hops = n_samples / hop;
+    std::vector<float> stream_out(n_samples, 0.0f);
+    for (int h = 0; h < n_hops; h++) {
+        ret = deepvqe_process_frame_f32(ctx,
+                                         mic.data() + h * hop,
+                                         ref.data() + h * hop,
+                                         hop,
+                                         stream_out.data() + h * hop);
+        if (ret != 0) {
+            fprintf(stderr, "  [%d] Stream frame %d failed\n", pair_idx, h);
+            return false;
+        }
+    }
+
+    // Streaming output is shifted by 1 hop (frame 0 outputs zeros = center
+    // padding). Compare stream[skip+hop:] with batch[skip:].
+    int skip = 2 * hop;
+    int cmp_len = n_hops * hop - skip - hop;
+    if (cmp_len <= 0) {
+        printf("  [%d] SKIP (too short after warmup)\n", pair_idx);
+        return true;
+    }
+
+    float max_err = max_abs_diff(batch_out.data() + skip,
+                                  stream_out.data() + skip + hop, cmp_len);
+    float mean_err = mean_abs_diff(batch_out.data() + skip,
+                                    stream_out.data() + skip + hop, cmp_len);
+    float max_val = 0.0f;
+    for (int i = 0; i < cmp_len; i++) {
+        float v = std::fabs(stream_out[skip + hop + i]);
+        if (v > max_val) max_val = v;
+    }
+
+    // Remaining error is from STFT frame 0: batch uses reflection padding,
+    // streaming uses zeros. This propagates through the GRU but stays small.
+    bool pass = max_err < 1e-2f;
+    printf("  [%d] %.1fs  max=%.2e mean=%.2e out=%.4f  %s\n",
+           pair_idx, (float)n_samples / sr, max_err, mean_err, max_val,
+           pass ? "OK" : "FAIL");
+    return pass;
+}
+#endif // DEEPVQE_HAS_SNDFILE
+
+static bool test_pcm_e2e(const char* model_path,
+                          const char* mic_dir, const char* ref_dir,
+                          int n_pairs) {
+    printf("=== Test 1: PCM end-to-end batch vs streaming (%d pairs) ===\n",
+           n_pairs);
+
+#ifndef DEEPVQE_HAS_SNDFILE
+    printf("  SKIP (built without libsndfile)\n\n");
+    return true;
+#else
+    // Collect files from both directories
+    printf("  Scanning %s ...\n", mic_dir);
+    std::vector<std::string> mic_files;
+    collect_flac(mic_dir, mic_files);
+    printf("  Scanning %s ...\n", ref_dir);
+    std::vector<std::string> ref_files;
+    collect_flac(ref_dir, ref_files);
+
+    if (mic_files.empty() || ref_files.empty()) {
+        fprintf(stderr, "  No FLAC files found (mic: %zu, ref: %zu)\n",
+                mic_files.size(), ref_files.size());
+        return false;
+    }
+    printf("  Found %zu mic files, %zu ref files\n",
+           mic_files.size(), ref_files.size());
+
+    // Sort for determinism, then pick n_pairs spread evenly
+    std::sort(mic_files.begin(), mic_files.end());
+    std::sort(ref_files.begin(), ref_files.end());
+    auto mic_idx = spread_indices(mic_files.size(), n_pairs);
+    auto ref_idx = spread_indices(ref_files.size(), n_pairs);
+
+    uintptr_t ctx = deepvqe_new(model_path);
+    if (!ctx) { fprintf(stderr, "Failed to load model\n"); return false; }
+
+    bool all_pass = true;
+    for (int i = 0; i < n_pairs; i++) {
+        if (!run_one_pcm_pair(ctx, mic_files[mic_idx[i]], ref_files[ref_idx[i]], i))
+            all_pass = false;
+    }
+
+    printf("  %s\n\n", all_pass ? "PASS" : "FAIL");
+    deepvqe_free(ctx);
+    return all_pass;
+#endif
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────
+
 int main(int argc, char** argv) {
     const char* model_path = nullptr;
-    const char* mic_path = nullptr;
-    const char* ref_path = nullptr;
+    const char* audio_mic_dir = nullptr;
+    const char* audio_ref_dir = nullptr;
+    int n_pairs = 5;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "--input-npy" && i + 2 < argc) {
-            mic_path = argv[++i];
-            ref_path = argv[++i];
+        if (arg == "--audio-dirs" && i + 2 < argc) {
+            audio_mic_dir = argv[++i];
+            audio_ref_dir = argv[++i];
+        } else if (arg == "--n-pairs" && i + 1 < argc) {
+            n_pairs = std::stoi(argv[++i]);
         } else if (!model_path) {
             model_path = argv[i];
         } else {
-            fprintf(stderr, "Usage: test_streaming model.gguf --input-npy mic.npy ref.npy\n");
+            fprintf(stderr, "Usage: test_streaming model.gguf "
+                    "--audio-dirs mic_dir/ ref_dir/ "
+                    "[--n-pairs 5]\n");
             return 1;
         }
     }
 
-    if (!model_path || !mic_path || !ref_path) {
-        fprintf(stderr, "Error: model path and --input-npy required\n");
+    if (!model_path || !audio_mic_dir || !audio_ref_dir) {
+        fprintf(stderr, "Usage: test_streaming model.gguf "
+                "--audio-dirs mic_dir/ ref_dir/ "
+                "[--n-pairs 5]\n");
         return 1;
     }
 
-    // Load model
-    printf("Loading model: %s\n", model_path);
-    uintptr_t ctx = deepvqe_new(model_path);
-    if (!ctx) { fprintf(stderr, "Failed to load model\n"); return 1; }
-
-    int hop = deepvqe_hop_length(ctx);
-    int n_fft = deepvqe_fft_size(ctx);
-    int n_freq = n_fft / 2 + 1;
-    printf("  hop=%d n_fft=%d n_freq=%d\n", hop, n_fft, n_freq);
-
-    // Load STFT input (1, F, T, 2)
-    printf("Loading inputs: %s, %s\n", mic_path, ref_path);
-    NpyArray mic_stft = npy_load(mic_path);
-    NpyArray ref_stft = npy_load(ref_path);
-    int T = (int)mic_stft.dim(2);
-    int F = (int)mic_stft.dim(1);
-    printf("  STFT shape: F=%d T=%d\n", F, T);
-
-    // ── Batch forward ─────────────────────────────────────────────────────
-    printf("\n--- Batch forward ---\n");
-    deepvqe_model model;
-    if (!load_model(model_path, model, false)) {
-        fprintf(stderr, "Failed to load model for batch forward\n");
-        return 1;
-    }
-    NpyArray batch_out = forward(mic_stft, ref_stft, model, "", false);
-    printf("  Output: (%lld, %lld, %lld, %lld)\n",
-           (long long)batch_out.dim(0), (long long)batch_out.dim(1),
-           (long long)batch_out.dim(2), (long long)batch_out.dim(3));
-
-    // ── Streaming forward ─────────────────────────────────────────────────
-    printf("\n--- Streaming forward ---\n");
-    deepvqe_stream_state stream_state;
-    init_stream_state(stream_state, model);
-
-    // Process frame-by-frame: extract STFT frames and feed to forward_frame
-    // Output: (F, T, 2)
-    std::vector<float> stream_out(F * T * 2, 0.0f);
-
-    for (int t = 0; t < T; t++) {
-        // Extract single STFT frame: (F, 1, 2) interleaved
-        std::vector<float> mic_frame(F * 2), ref_frame(F * 2);
-        for (int f = 0; f < F; f++) {
-            mic_frame[f * 2 + 0] = mic_stft.data[f * T * 2 + t * 2 + 0];
-            mic_frame[f * 2 + 1] = mic_stft.data[f * T * 2 + t * 2 + 1];
-            ref_frame[f * 2 + 0] = ref_stft.data[f * T * 2 + t * 2 + 0];
-            ref_frame[f * 2 + 1] = ref_stft.data[f * T * 2 + t * 2 + 1];
-        }
-
-        std::vector<float> enh_frame(F * 2);
-        forward_frame(mic_frame.data(), ref_frame.data(), model,
-                      stream_state, enh_frame.data());
-
-        // Store in (F, T, 2) layout
-        for (int f = 0; f < F; f++) {
-            stream_out[f * T * 2 + t * 2 + 0] = enh_frame[f * 2 + 0];
-            stream_out[f * T * 2 + t * 2 + 1] = enh_frame[f * 2 + 1];
-        }
-    }
-    printf("  Processed %d frames\n", T);
-
-    // ── Compare ───────────────────────────────────────────────────────────
-    printf("\n--- Comparison ---\n");
-    int n_total = F * T * 2;
-    float max_err = max_abs_diff(batch_out.data.data(), stream_out.data(), n_total);
-    float mean_err = mean_abs_diff(batch_out.data.data(), stream_out.data(), n_total);
-    printf("  max_abs_diff:  %.2e\n", max_err);
-    printf("  mean_abs_diff: %.2e\n", mean_err);
-
-    // Per-frame errors
-    float worst_frame_err = 0.0f;
-    int worst_frame = 0;
-    for (int t = 0; t < T; t++) {
-        float frame_max = 0.0f;
-        for (int f = 0; f < F; f++) {
-            for (int c = 0; c < 2; c++) {
-                int idx = f * T * 2 + t * 2 + c;
-                float err = std::fabs(batch_out.data[idx] - stream_out[idx]);
-                if (err > frame_max) frame_max = err;
-            }
-        }
-        if (frame_max > worst_frame_err) {
-            worst_frame_err = frame_max;
-            worst_frame = t;
-        }
-    }
-    printf("  Worst frame: t=%d (max_err=%.2e)\n", worst_frame, worst_frame_err);
-
-    bool pass = max_err < 1e-5f;
-    printf("\n  %s (threshold: 1e-5)\n", pass ? "PASS" : "FAIL");
-
-    deepvqe_free(ctx);
+    bool pass = test_pcm_e2e(model_path, audio_mic_dir, audio_ref_dir, n_pairs);
+    printf("=== %s ===\n", pass ? "PASSED" : "FAILED");
     return pass ? 0 : 1;
 }

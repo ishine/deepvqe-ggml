@@ -16,6 +16,7 @@
           pkgs.cmake         # GGML C++ build
           pkgs.gcc           # C/C++ compiler
           pkgs.pkg-config
+          pkgs.libsndfile    # FLAC/WAV decoding for tests
         ];
       };
     };

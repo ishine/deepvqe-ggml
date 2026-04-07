@@ -171,6 +171,60 @@ void npy_save(const std::string& path, const float* data,
     f.write(reinterpret_cast<const char*>(data), numel * sizeof(float));
 }
 
+// ── Audio I/O ────────────────────────────────────────────────────────────────
+
+#ifdef DEEPVQE_HAS_SNDFILE
+#include <sndfile.h>
+
+std::vector<float> audio_load_mono(const std::string& path, int target_sr) {
+    SF_INFO info = {};
+    SNDFILE* sf = sf_open(path.c_str(), SFM_READ, &info);
+    if (!sf) {
+        fprintf(stderr, "Failed to open audio: %s (%s)\n",
+                path.c_str(), sf_strerror(nullptr));
+        return {};
+    }
+
+    // Read all frames as float
+    std::vector<float> raw(info.frames * info.channels);
+    sf_count_t read = sf_readf_float(sf, raw.data(), info.frames);
+    sf_close(sf);
+
+    if (read != info.frames) {
+        fprintf(stderr, "Short read: %s (%lld of %lld frames)\n",
+                path.c_str(), (long long)read, (long long)info.frames);
+    }
+
+    // Mix to mono if needed
+    std::vector<float> mono(read);
+    if (info.channels == 1) {
+        mono.assign(raw.begin(), raw.begin() + read);
+    } else {
+        for (sf_count_t i = 0; i < read; i++) {
+            float sum = 0.0f;
+            for (int c = 0; c < info.channels; c++)
+                sum += raw[i * info.channels + c];
+            mono[i] = sum / info.channels;
+        }
+    }
+
+    // Simple integer-ratio resampling (decimation) if needed
+    if (info.samplerate != target_sr) {
+        if (info.samplerate % target_sr != 0) {
+            fprintf(stderr, "Cannot resample %d -> %d (non-integer ratio)\n",
+                    info.samplerate, target_sr);
+            return {};
+        }
+        int ratio = info.samplerate / target_sr;
+        std::vector<float> resampled(mono.size() / ratio);
+        for (size_t i = 0; i < resampled.size(); i++)
+            resampled[i] = mono[i * ratio];
+        return resampled;
+    }
+    return mono;
+}
+#endif
+
 // ── GGUF tensor loading ────────────────────────────────────────────────────
 
 NpyArray load_tensor_from_ggml(struct ggml_context* ctx,
@@ -260,4 +314,125 @@ bool print_result(const std::string& name, float max_err, float mean_err,
 
     printf("  [%s] %s: max=%.2e mean=%.2e\n", status, name.c_str(), max_err, mean_err);
     return max_err < fail_threshold;
+}
+
+// ── FFT / STFT / iSTFT (via KissFFT) ────────────────────────────────────────
+
+#include "kiss_fftr.h"
+
+// Verify kiss_fft_cpx layout matches our interleaved float format
+static_assert(sizeof(kiss_fft_cpx) == 2 * sizeof(float),
+              "kiss_fft_cpx must be packed {float r, i}");
+
+std::vector<float> make_sqrt_hann(int n) {
+    std::vector<float> w(n);
+    for (int i = 0; i < n; i++) {
+        float hann = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / n));
+        w[i] = sqrtf(hann + 1e-12f);
+    }
+    return w;
+}
+
+void compute_stft(const float* signal, int N,
+                  int n_fft, int hop, const float* window,
+                  float* out, int n_freq, int n_frames,
+                  stft_buffers* bufs) {
+    int pad = n_fft / 2;
+
+    // Use external or temporary resources
+    kiss_fftr_cfg cfg = bufs && bufs->fwd_cfg
+        ? (kiss_fftr_cfg)bufs->fwd_cfg
+        : kiss_fftr_alloc(n_fft, 0, nullptr, nullptr);
+    std::vector<float> scratch_tmp;
+    std::vector<float> cpx_tmp;
+    float* windowed;
+    kiss_fft_cpx* cpx_out;
+    if (bufs && bufs->scratch && bufs->cpx_buf) {
+        windowed = bufs->scratch;
+        cpx_out = reinterpret_cast<kiss_fft_cpx*>(bufs->cpx_buf);
+    } else {
+        scratch_tmp.resize(n_fft);
+        cpx_tmp.resize(n_freq * 2);
+        windowed = scratch_tmp.data();
+        cpx_out = reinterpret_cast<kiss_fft_cpx*>(cpx_tmp.data());
+    }
+
+    for (int t = 0; t < n_frames; t++) {
+        int center = t * hop;
+        for (int i = 0; i < n_fft; i++) {
+            int src = center - pad + i;
+            windowed[i] = signal[reflect_idx(src, N)] * window[i];
+        }
+        kiss_fftr(cfg, windowed, cpx_out);
+        for (int f = 0; f < n_freq; f++) {
+            out[f * n_frames * 2 + t * 2 + 0] = cpx_out[f].r;
+            out[f * n_frames * 2 + t * 2 + 1] = cpx_out[f].i;
+        }
+    }
+
+    if (!bufs || !bufs->fwd_cfg) kiss_fftr_free(cfg);
+}
+
+void compute_istft(const float* stft_data, int n_freq, int n_frames,
+                   int n_fft, int hop, const float* window,
+                   float* signal, int N,
+                   stft_buffers* bufs) {
+    int pad = n_fft / 2;
+    int padded_len = (n_frames - 1) * hop + n_fft;
+
+    // Use external or temporary resources
+    kiss_fftr_cfg icfg = bufs && bufs->inv_cfg
+        ? (kiss_fftr_cfg)bufs->inv_cfg
+        : kiss_fftr_alloc(n_fft, 1, nullptr, nullptr);
+
+    std::vector<float> scratch_tmp, cpx_tmp, out_tmp, wsum_tmp;
+    float* scratch;
+    kiss_fft_cpx* cpx_in;
+    float* output;
+    float* window_sum;
+
+    if (bufs && bufs->scratch && bufs->cpx_buf) {
+        scratch = bufs->scratch;
+        cpx_in = reinterpret_cast<kiss_fft_cpx*>(bufs->cpx_buf);
+    } else {
+        scratch_tmp.resize(n_fft);
+        cpx_tmp.resize(n_freq * 2);
+        scratch = scratch_tmp.data();
+        cpx_in = reinterpret_cast<kiss_fft_cpx*>(cpx_tmp.data());
+    }
+    if (bufs && bufs->ola_out && bufs->ola_wsum) {
+        output = bufs->ola_out;
+        window_sum = bufs->ola_wsum;
+    } else {
+        out_tmp.resize(padded_len, 0.0f);
+        wsum_tmp.resize(padded_len, 0.0f);
+        output = out_tmp.data();
+        window_sum = wsum_tmp.data();
+    }
+    std::fill_n(output, padded_len, 0.0f);
+    std::fill_n(window_sum, padded_len, 0.0f);
+
+    float inv_n = 1.0f / n_fft;
+    for (int t = 0; t < n_frames; t++) {
+        for (int f = 0; f < n_freq; f++) {
+            cpx_in[f].r = stft_data[f * n_frames * 2 + t * 2 + 0];
+            cpx_in[f].i = stft_data[f * n_frames * 2 + t * 2 + 1];
+        }
+        kiss_fftri(icfg, cpx_in, scratch);
+
+        int start = t * hop;
+        for (int i = 0; i < n_fft; i++) {
+            float sample = scratch[i] * inv_n;
+            output[start + i]     += sample * window[i];
+            window_sum[start + i] += window[i] * window[i];
+        }
+    }
+
+    if (!bufs || !bufs->inv_cfg) kiss_fftr_free(icfg);
+
+    float threshold = 1e-11f;
+    for (int i = 0; i < N; i++) {
+        float ws = window_sum[i + pad];
+        signal[i] = ws > threshold ? output[i + pad] / ws : 0.0f;
+    }
 }

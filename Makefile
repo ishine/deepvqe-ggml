@@ -45,9 +45,20 @@ test-quantize: build-ggml ## Compare F32 vs Q8_0 quantized model outputs
 		--input-npy intermediates/pytorch/mic_stft.npy intermediates/pytorch/ref_stft.npy
 
 .PHONY: test-streaming
-test-streaming: build-ggml ## Compare batch vs streaming frame-by-frame outputs
+test-streaming: build-ggml ## PCM batch-vs-streaming equivalence test
 	ggml/build/test_streaming deepvqe.gguf \
-		--input-npy intermediates/blocks/input_mic_stft.npy intermediates/blocks/input_ref_stft.npy
+		--audio-dirs datasets_fullband/clean datasets_fullband/noise
+
+NPROC_MINUS_1 := $(shell echo $$(($$(nproc) - 1)))
+GGML_ENH_DIR  := ggml_eval
+
+.PHONY: eval-ggml
+eval-ggml: build-ggml ## Run GGML model on val data, score with MOS models
+	@mkdir -p $(GGML_ENH_DIR)
+	GGML_NTHREADS=$(NPROC_MINUS_1) ggml/build/eval_graph deepvqe.gguf \
+		--val-dir eval_output/val_audio \
+		--save-dir $(GGML_ENH_DIR)
+	$(MAKE) -C train eval-ggml GGML_ENH_DIR=../$(GGML_ENH_DIR)
 
 # ── Training delegation ─────────────────────────────────────────────────────
 

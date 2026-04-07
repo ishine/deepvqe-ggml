@@ -103,6 +103,21 @@ listen: build ## Generate WAV audio from checkpoint (set CHECKPOINT=path)
 	$(DOCKER_UTIL) $(IMAGE) \
 		python scripts/listen.py --config $(CONFIG) --checkpoint $(CHECKPOINT) $(EXTRA_ARGS)
 
+.PHONY: dump-val-audio
+dump-val-audio: build ## Dump 1000 validation audio triples (mic/ref/clean) for C++ testing
+	$(DOCKER_UTIL) $(IMAGE) \
+		python scripts/dump_val_audio.py --config $(CONFIG) --checkpoint $(CHECKPOINT) \
+			--output ../eval_output/val_audio $(EXTRA_ARGS)
+
+GGML_ENH_DIR ?= ../ggml_eval
+
+.PHONY: eval-ggml
+eval-ggml: build-onnx ## Score GGML-enhanced audio with DNSMOS/AECMOS/PESQ/STOI
+	$(DOCKER_UTIL) $(IMAGE_ONNX) \
+		python3 scripts/eval_ggml.py \
+			--val-dir ../eval_output/val_audio \
+			--enh-dir $(GGML_ENH_DIR) $(EXTRA_ARGS)
+
 .PHONY: export
 export: build ## Export checkpoint to GGUF (set CHECKPOINT=path)
 	$(DOCKER_UTIL) $(IMAGE) \

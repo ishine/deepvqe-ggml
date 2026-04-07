@@ -19,23 +19,48 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(GGML_STATIC ON CACHE BOOL "" FORCE)
 add_subdirectory(vendor/ggml)
 
-# Common library (npy I/O, comparison utilities)
+# Optional: libsndfile for audio loading in tests
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(SNDFILE sndfile)
+endif()
+
+# KissFFT (vendored, with OpenMP)
+add_library(kissfft STATIC
+    vendor/kissfft/kiss_fft.c
+    vendor/kissfft/kiss_fftr.c)
+target_include_directories(kissfft PUBLIC vendor/kissfft)
+find_package(OpenMP)
+if(OpenMP_C_FOUND)
+    target_link_libraries(kissfft PUBLIC OpenMP::OpenMP_C)
+endif()
+
+# Common library (npy I/O, STFT via KissFFT, comparison utilities, audio metrics)
 add_library(dvqe_common STATIC common.cpp)
 target_include_directories(dvqe_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(dvqe_common PUBLIC ggml)
+target_link_libraries(dvqe_common PUBLIC ggml kissfft)
+if(SNDFILE_FOUND)
+    target_compile_definitions(dvqe_common PUBLIC DEEPVQE_HAS_SNDFILE)
+    target_include_directories(dvqe_common PUBLIC ${SNDFILE_INCLUDE_DIRS})
+    target_link_libraries(dvqe_common PUBLIC ${SNDFILE_LIBRARIES})
+endif()
 
-# Model library (shared between CLI and C API)
+# Hand-rolled model (streaming forward_frame only — kept for legacy tests)
 add_library(dvqe_model STATIC deepvqe_model.cpp)
 target_link_libraries(dvqe_model PUBLIC dvqe_common)
 
-# Main inference binary (CLI)
-add_executable(deepvqe deepvqe.cpp)
-target_link_libraries(deepvqe PRIVATE dvqe_model)
+# GGML graph model (streaming + batch inference)
+add_library(dvqe_graph STATIC deepvqe_graph.cpp)
+target_link_libraries(dvqe_graph PUBLIC dvqe_common)
+
+# Main inference binary (CLI, uses C API → dvqe_graph)
+add_executable(deepvqe deepvqe.cpp deepvqe_api.cpp)
+target_link_libraries(deepvqe PRIVATE dvqe_graph)
 
 # Shared library with C API (for purego / dlopen)
 if(DEEPVQE_BUILD_SHARED)
     add_library(deepvqe_shared SHARED deepvqe_api.cpp)
-    target_link_libraries(deepvqe_shared PRIVATE dvqe_model)
+    target_link_libraries(deepvqe_shared PRIVATE dvqe_graph)
     target_compile_definitions(deepvqe_shared PRIVATE DEEPVQE_BUILD)
     set_target_properties(deepvqe_shared PROPERTIES
         OUTPUT_NAME "deepvqe"
@@ -52,7 +77,7 @@ if(DEEPVQE_BUILD_SHARED)
     install(FILES deepvqe_api.h DESTINATION include)
 endif()
 
-# Per-block test binaries (only built if source exists)
+# Per-block test binaries (self-contained, dvqe_common only)
 foreach(block fe encoder bottleneck decoder ccm align)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_${block}.cpp")
         add_executable(test_${block} test_${block}.cpp)
@@ -60,14 +85,38 @@ foreach(block fe encoder bottleneck decoder ccm align)
     endif()
 endforeach()
 
-# Quantization divergence test (needs full model forward pass)
+# Quantization divergence test
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_quantize.cpp")
     add_executable(test_quantize test_quantize.cpp)
-    target_link_libraries(test_quantize PRIVATE dvqe_model)
+    target_link_libraries(test_quantize PRIVATE dvqe_graph)
 endif()
 
-# Streaming equivalence test (needs model forward + C API)
+# Streaming/batch equivalence test (uses C API)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_streaming.cpp")
     add_executable(test_streaming test_streaming.cpp deepvqe_api.cpp)
-    target_link_libraries(test_streaming PRIVATE dvqe_model)
+    target_link_libraries(test_streaming PRIVATE dvqe_graph)
+endif()
+
+# Benchmark
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp")
+    add_executable(bench bench.cpp)
+    target_link_libraries(bench PRIVATE dvqe_model dvqe_graph)
+endif()
+
+# Minimal conv2d test
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_conv2d_minimal.cpp")
+    add_executable(test_conv2d_minimal test_conv2d_minimal.cpp)
+    target_link_libraries(test_conv2d_minimal PRIVATE ggml)
+endif()
+
+# STFT test
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_stft.cpp")
+    add_executable(test_stft test_stft.cpp)
+    target_link_libraries(test_stft PRIVATE dvqe_common)
+endif()
+
+# GGML graph evaluation (uses C API)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/eval_graph.cpp")
+    add_executable(eval_graph eval_graph.cpp deepvqe_api.cpp)
+    target_link_libraries(eval_graph PRIVATE dvqe_graph)
 endif()
